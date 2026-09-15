@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -11,8 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"net/http"
-	"net/http/httptest"
 )
 
 func TestPricingSyncExpressionPriority(t *testing.T) {
@@ -139,4 +140,48 @@ func TestPricingSyncCompleteSourcesAndArrayFormats(t *testing.T) {
 	assert.Equal(t, float64(4), response.Data.Prices["sync-token"].Upstreams["Expressions(1)"]["completion_ratio"])
 	assert.Equal(t, float64(0), response.Data.Prices["sync-token"].Upstreams["Expressions(1)"]["cache_ratio"])
 	assert.Equal(t, float64(0), response.Data.Prices["sync-free"].Upstreams["Legacy(2)"]["model_ratio"])
+}
+
+func TestApplyProtectToEffectivePricingAddsMarkup(t *testing.T) {
+	protect := *ratio_setting.GetRatioProtectSetting()
+	t.Cleanup(func() {
+		config.UpdateConfigFromMap(config.GlobalConfig.Get("ratio_protect_setting"), map[string]string{
+			"enabled":             fmtBool(protect.Enabled),
+			"protect_model_ratio": fmtBool(protect.ProtectModelRatio),
+			"markup_mode":         protect.MarkupMode,
+			"markup_value":        fmtFloat(protect.MarkupValue),
+			"skip_zero_upstream":  fmtBool(protect.SkipZeroUpstream),
+		})
+	})
+	config.UpdateConfigFromMap(config.GlobalConfig.Get("ratio_protect_setting"), map[string]string{
+		"enabled":             "true",
+		"protect_model_ratio": "true",
+		"markup_mode":         "add",
+		"markup_value":        "0.1",
+		"skip_zero_upstream":  "true",
+	})
+	protected := applyProtectToEffectivePricing(map[string]any{
+		"model_ratio": map[string]any{"gpt": 0.2},
+	})
+	assert.Equal(t, 0.3, toFloat(valueMap(protected["model_ratio"])["gpt"]))
+}
+
+func fmtBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func fmtFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func toFloat(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	default:
+		return 0
+	}
 }

@@ -475,6 +475,17 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	default:
+		if strings.HasPrefix(option.Key, "ratio_protect_setting.") {
+			err = ratio_setting.ValidateRatioProtectOption(option.Key, option.Value.(string))
+			if err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": err.Error(),
+				})
+				return
+			}
+		}
 	}
 	if model.IsPasskeyDomainOption(option.Key) {
 		change, updateErr := model.UpdatePasskeyDomainOptions(map[string]string{option.Key: option.Value.(string)}, false, "")

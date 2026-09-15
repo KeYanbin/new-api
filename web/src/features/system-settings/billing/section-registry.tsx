@@ -25,6 +25,7 @@ import { PaymentSettingsSection } from '../integrations/payment-settings-section
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { RatioProtectSection } from './ratio-protect-section'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -113,6 +114,31 @@ const BILLING_SECTIONS = [
         groupDefaults={getGroupDefaults(settings)}
         toolPricesDefault={settings['tool_price_setting.prices']}
         visibleTabs={['models', 'unset-models', 'tool-prices', 'upstream-sync']}
+      />
+    ),
+  },
+  {
+    id: 'ratio-protect',
+    titleKey: 'Upstream Ratio Protection',
+    build: (settings: BillingSettings) => (
+      <RatioProtectSection
+        defaultValues={{
+          enabled: settings['ratio_protect_setting.enabled'],
+          auto_apply: settings['ratio_protect_setting.auto_apply'],
+          interval_minutes: settings['ratio_protect_setting.interval_minutes'],
+          channel_id: settings['ratio_protect_setting.channel_id'],
+          endpoint: settings['ratio_protect_setting.endpoint'],
+          markup_mode: settings['ratio_protect_setting.markup_mode'],
+          markup_value: settings['ratio_protect_setting.markup_value'],
+          protect_model_ratio:
+            settings['ratio_protect_setting.protect_model_ratio'],
+          protect_model_price:
+            settings['ratio_protect_setting.protect_model_price'],
+          skip_zero_upstream:
+            settings['ratio_protect_setting.skip_zero_upstream'],
+          max_change_factor: settings['ratio_protect_setting.max_change_factor'],
+          notify: settings['ratio_protect_setting.notify'],
+        }}
       />
     ),
   },

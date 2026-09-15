@@ -121,3 +121,11 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
   )
   return res.data
 }
+
+export async function triggerRatioProtectTask() {
+  const res = await api.post<SystemTaskResponse>('/api/ratio_sync/protect', null, {
+    validateStatus: (status) =>
+      (status >= 200 && status < 300) || status === 409,
+  })
+  return res.data
+}

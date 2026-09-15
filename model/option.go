@@ -230,6 +230,9 @@ func validateOptionValue(key string, value string) error {
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
+	if strings.HasPrefix(key, "ratio_protect_setting.") {
+		return ratio_setting.ValidateRatioProtectOption(key, value)
+	}
 	return nil
 }
 
