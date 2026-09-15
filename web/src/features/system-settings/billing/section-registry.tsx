@@ -120,27 +120,37 @@ const BILLING_SECTIONS = [
   {
     id: 'ratio-protect',
     titleKey: 'Upstream Ratio Protection',
-    build: (settings: BillingSettings) => (
-      <RatioProtectSection
-        defaultValues={{
-          enabled: settings['ratio_protect_setting.enabled'],
-          auto_apply: settings['ratio_protect_setting.auto_apply'],
-          interval_minutes: settings['ratio_protect_setting.interval_minutes'],
-          channel_id: settings['ratio_protect_setting.channel_id'],
-          endpoint: settings['ratio_protect_setting.endpoint'],
-          markup_mode: settings['ratio_protect_setting.markup_mode'],
-          markup_value: settings['ratio_protect_setting.markup_value'],
-          protect_model_ratio:
-            settings['ratio_protect_setting.protect_model_ratio'],
-          protect_model_price:
-            settings['ratio_protect_setting.protect_model_price'],
-          skip_zero_upstream:
-            settings['ratio_protect_setting.skip_zero_upstream'],
-          max_change_factor: settings['ratio_protect_setting.max_change_factor'],
-          notify: settings['ratio_protect_setting.notify'],
-        }}
-      />
-    ),
+    build: (settings: BillingSettings) => {
+      let channelIds = settings['ratio_protect_setting.channel_ids'] ?? []
+      if (channelIds.length === 0 && settings['ratio_protect_setting.channel_id']) {
+        channelIds = [settings['ratio_protect_setting.channel_id']]
+      }
+      return (
+        <RatioProtectSection
+          defaultValues={{
+            enabled: settings['ratio_protect_setting.enabled'],
+            auto_apply: settings['ratio_protect_setting.auto_apply'],
+            interval_minutes: settings['ratio_protect_setting.interval_minutes'],
+            channel_id: settings['ratio_protect_setting.channel_id'],
+            channel_ids: channelIds,
+            endpoint: settings['ratio_protect_setting.endpoint'],
+            markup_mode: settings['ratio_protect_setting.markup_mode'],
+            markup_value: settings['ratio_protect_setting.markup_value'],
+            protect_model_ratio:
+              settings['ratio_protect_setting.protect_model_ratio'],
+            protect_model_price:
+              settings['ratio_protect_setting.protect_model_price'],
+            protect_group_ratio:
+              settings['ratio_protect_setting.protect_group_ratio'],
+            skip_zero_upstream:
+              settings['ratio_protect_setting.skip_zero_upstream'],
+            max_change_factor:
+              settings['ratio_protect_setting.max_change_factor'],
+            notify: settings['ratio_protect_setting.notify'],
+          }}
+        />
+      )
+    },
   },
   {
     id: 'group-pricing',

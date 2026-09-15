@@ -2,7 +2,9 @@ package ratio_setting
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,6 +18,7 @@ const (
 
 	RatioProtectFieldModelRatio = "model_ratio"
 	RatioProtectFieldModelPrice = "model_price"
+	RatioProtectFieldGroupRatio = "group_ratio"
 
 	DefaultRatioProtectIntervalMinutes = 15
 	MinRatioProtectIntervalMinutes     = 5
@@ -36,34 +39,39 @@ const (
 )
 
 type RatioProtectSetting struct {
-	Enabled           bool                          `json:"enabled"`
-	AutoApply         bool                          `json:"auto_apply"`
-	IntervalMinutes   int                           `json:"interval_minutes"`
-	ChannelID         int                           `json:"channel_id"`
-	Endpoint          string                        `json:"endpoint"`
-	MarkupMode        string                        `json:"markup_mode"`
-	MarkupValue       float64                       `json:"markup_value"`
-	ProtectModelRatio bool                          `json:"protect_model_ratio"`
-	ProtectModelPrice bool                          `json:"protect_model_price"`
-	SkipZeroUpstream  bool                          `json:"skip_zero_upstream"`
-	MaxChangeFactor   float64                       `json:"max_change_factor"`
-	Notify            bool                          `json:"notify"`
-	LastSeen          map[string]map[string]float64 `json:"last_seen"`
-	LastSeenSource    string                        `json:"last_seen_source"`
+	Enabled            bool                          `json:"enabled"`
+	AutoApply          bool                          `json:"auto_apply"`
+	IntervalMinutes    int                           `json:"interval_minutes"`
+	ChannelID          int                           `json:"channel_id"`
+	ChannelIDs         []int                         `json:"channel_ids"`
+	Endpoint           string                        `json:"endpoint"`
+	MarkupMode         string                        `json:"markup_mode"`
+	MarkupValue        float64                       `json:"markup_value"`
+	ProtectModelRatio  bool                          `json:"protect_model_ratio"`
+	ProtectModelPrice  bool                          `json:"protect_model_price"`
+	ProtectGroupRatio  bool                          `json:"protect_group_ratio"`
+	SkipZeroUpstream   bool                          `json:"skip_zero_upstream"`
+	MaxChangeFactor    float64                       `json:"max_change_factor"`
+	Notify             bool                          `json:"notify"`
+	LastSeen           map[string]map[string]float64 `json:"last_seen"`
+	LastSeenSource     string                        `json:"last_seen_source"`
+	LastSeenGroupRatio map[string]float64            `json:"last_seen_group_ratio"`
 }
 
 var ratioProtectSetting = RatioProtectSetting{
-	Enabled:           false,
-	AutoApply:         true,
-	IntervalMinutes:   DefaultRatioProtectIntervalMinutes,
-	MarkupMode:        RatioProtectModeAdd,
-	MarkupValue:       DefaultRatioProtectMarkupValue,
-	ProtectModelRatio: true,
-	ProtectModelPrice: false,
-	SkipZeroUpstream:  true,
-	MaxChangeFactor:   DefaultRatioProtectMaxChangeFactor,
-	Notify:            true,
-	LastSeen:          map[string]map[string]float64{},
+	Enabled:            false,
+	AutoApply:          true,
+	IntervalMinutes:    DefaultRatioProtectIntervalMinutes,
+	MarkupMode:         RatioProtectModeAdd,
+	MarkupValue:        DefaultRatioProtectMarkupValue,
+	ProtectModelRatio:  true,
+	ProtectModelPrice:  false,
+	ProtectGroupRatio:  true,
+	SkipZeroUpstream:   true,
+	MaxChangeFactor:    DefaultRatioProtectMaxChangeFactor,
+	Notify:             true,
+	LastSeen:           map[string]map[string]float64{},
+	LastSeenGroupRatio: map[string]float64{},
 }
 
 func init() {
@@ -77,6 +85,46 @@ func GetRatioProtectSetting() *RatioProtectSetting {
 
 func RatioProtectSourceKey(channelID int, endpoint string) string {
 	return fmt.Sprintf("%d|%s", channelID, strings.TrimSpace(endpoint))
+}
+
+func RatioProtectSourceKeys(channelIDs []int, endpoint string) string {
+	ids := uniqueChannelIDs(channelIDs)
+	slices.Sort(ids)
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, strconv.Itoa(id))
+	}
+	return strings.Join(parts, ",") + "|" + strings.TrimSpace(endpoint)
+}
+
+func (setting *RatioProtectSetting) SelectedChannelIDs() []int {
+	if setting == nil {
+		return nil
+	}
+	ids := uniqueChannelIDs(setting.ChannelIDs)
+	if len(ids) > 0 {
+		return ids
+	}
+	if setting.ChannelID != 0 {
+		return []int{setting.ChannelID}
+	}
+	return nil
+}
+
+func uniqueChannelIDs(values []int) []int {
+	seen := make(map[int]struct{}, len(values))
+	result := make([]int, 0, len(values))
+	for _, value := range values {
+		if value == 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func normalizeRatioProtectSetting(setting *RatioProtectSetting) {
@@ -98,11 +146,21 @@ func normalizeRatioProtectSetting(setting *RatioProtectSetting) {
 	if math.IsNaN(setting.MaxChangeFactor) || math.IsInf(setting.MaxChangeFactor, 0) || setting.MaxChangeFactor < 0 {
 		setting.MaxChangeFactor = DefaultRatioProtectMaxChangeFactor
 	}
-	if !setting.ProtectModelRatio && !setting.ProtectModelPrice {
+	if !setting.ProtectModelRatio && !setting.ProtectModelPrice && !setting.ProtectGroupRatio {
 		setting.ProtectModelRatio = true
 	}
 	if setting.LastSeen == nil {
 		setting.LastSeen = map[string]map[string]float64{}
+	}
+	if setting.LastSeenGroupRatio == nil {
+		setting.LastSeenGroupRatio = map[string]float64{}
+	}
+	setting.ChannelIDs = uniqueChannelIDs(setting.ChannelIDs)
+	if len(setting.ChannelIDs) == 0 && setting.ChannelID != 0 {
+		setting.ChannelIDs = []int{setting.ChannelID}
+	}
+	if len(setting.ChannelIDs) > 0 {
+		setting.ChannelID = setting.ChannelIDs[0]
 	}
 }
 
@@ -112,6 +170,7 @@ func ValidateRatioProtectOption(key, value string) error {
 		"ratio_protect_setting.auto_apply",
 		"ratio_protect_setting.protect_model_ratio",
 		"ratio_protect_setting.protect_model_price",
+		"ratio_protect_setting.protect_group_ratio",
 		"ratio_protect_setting.skip_zero_upstream",
 		"ratio_protect_setting.notify":
 		if _, err := strconv.ParseBool(value); err != nil {
@@ -125,6 +184,11 @@ func ValidateRatioProtectOption(key, value string) error {
 	case "ratio_protect_setting.channel_id":
 		if _, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("channel_id must be an integer")
+		}
+	case "ratio_protect_setting.channel_ids":
+		var ids []int
+		if err := common.UnmarshalJsonStr(value, &ids); err != nil {
+			return fmt.Errorf("channel_ids must be a JSON array of integers")
 		}
 	case "ratio_protect_setting.endpoint":
 		trimmed := strings.TrimSpace(value)
@@ -155,6 +219,11 @@ func ValidateRatioProtectOption(key, value string) error {
 		}
 	case "ratio_protect_setting.last_seen_source":
 		return nil
+	case "ratio_protect_setting.last_seen_group_ratio":
+		var seen map[string]float64
+		if err := common.UnmarshalJsonStr(value, &seen); err != nil {
+			return fmt.Errorf("last_seen_group_ratio must be a JSON object")
+		}
 	}
 	return nil
 }
@@ -195,6 +264,8 @@ func ProtectFieldEnabled(field string, setting *RatioProtectSetting) bool {
 		return setting.ProtectModelRatio
 	case RatioProtectFieldModelPrice:
 		return setting.ProtectModelPrice
+	case RatioProtectFieldGroupRatio:
+		return setting.ProtectGroupRatio
 	default:
 		return false
 	}
@@ -270,11 +341,11 @@ func ApplyProtectToPricingSyncData(data map[string]any) map[string]any {
 }
 
 func ApplyProtectToPricingSyncDataWithSetting(data map[string]any, setting *RatioProtectSetting) map[string]any {
-	if setting == nil || !setting.Enabled || (!setting.ProtectModelRatio && !setting.ProtectModelPrice) {
+	if setting == nil || !setting.Enabled || (!setting.ProtectModelRatio && !setting.ProtectModelPrice && !setting.ProtectGroupRatio) {
 		return data
 	}
 	result := clonePricingSyncMap(data)
-	for _, field := range []string{RatioProtectFieldModelRatio, RatioProtectFieldModelPrice} {
+	for _, field := range []string{RatioProtectFieldModelRatio, RatioProtectFieldModelPrice, RatioProtectFieldGroupRatio} {
 		if !ProtectFieldEnabled(field, setting) {
 			continue
 		}
@@ -540,4 +611,118 @@ func ApplyDecisionToLastSeen(seen map[string]map[string]float64, decision RatioP
 	}
 	seen[decision.Name] = decision.Raw
 	return seen
+}
+
+func CloneGroupRatioLastSeen(seen map[string]float64) map[string]float64 {
+	result := make(map[string]float64, len(seen))
+	maps.Copy(result, seen)
+	return result
+}
+
+func ApplyDecisionToGroupRatioLastSeen(seen map[string]float64, decision RatioProtectDecision) map[string]float64 {
+	if seen == nil {
+		seen = map[string]float64{}
+	}
+	switch decision.Action {
+	case RatioProtectActionSkipNew, RatioProtectActionSkipAnomaly:
+		return seen
+	}
+	if raw, ok := decision.Raw[RatioProtectFieldGroupRatio]; ok {
+		seen[decision.Name] = raw
+	}
+	return seen
+}
+
+func groupRatioValueMap(data map[string]any) map[string]float64 {
+	entries := pricingSyncFieldMap(data, RatioProtectFieldGroupRatio)
+	result := make(map[string]float64, len(entries))
+	for name, raw := range entries {
+		if value, ok := asProtectFloat64(raw); ok {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func localHasGroupRatio(localData map[string]any, name string) bool {
+	_, ok := groupRatioValueMap(localData)[name]
+	return ok
+}
+
+func DecideGroupRatioProtectActions(localData, upstreamData map[string]any, lastSeen map[string]float64, setting *RatioProtectSetting) []RatioProtectDecision {
+	if setting == nil {
+		setting = GetRatioProtectSetting()
+	}
+	if !setting.ProtectGroupRatio {
+		return nil
+	}
+	if lastSeen == nil {
+		lastSeen = map[string]float64{}
+	}
+	rawValues := groupRatioValueMap(upstreamData)
+	localValues := groupRatioValueMap(localData)
+	names := make([]string, 0, len(rawValues))
+	for name := range rawValues {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	decisions := make([]RatioProtectDecision, 0, len(names))
+	for _, name := range names {
+		rawValue := rawValues[name]
+		raw := map[string]float64{RatioProtectFieldGroupRatio: rawValue}
+		localFields := map[string]float64{}
+		if localValue, ok := localValues[name]; ok {
+			localFields[RatioProtectFieldGroupRatio] = localValue
+		}
+		decision := RatioProtectDecision{Name: name, Raw: raw, Local: localFields}
+		if !localHasGroupRatio(localData, name) {
+			decision.Action = RatioProtectActionSkipNew
+			decisions = append(decisions, decision)
+			continue
+		}
+		if setting.SkipZeroUpstream && rawValue == 0 {
+			decision.Action = RatioProtectActionSkipZero
+			decision.Target = raw
+			decisions = append(decisions, decision)
+			continue
+		}
+		target := applyMarkupToFields(raw, setting)
+		decision.Target = target
+		previousValue, seen := lastSeen[name]
+		var previous map[string]float64
+		if seen {
+			previous = map[string]float64{RatioProtectFieldGroupRatio: previousValue}
+		}
+		if seen && isAnomalousChange(previous, raw, setting.MaxChangeFactor) {
+			decision.Action = RatioProtectActionSkipAnomaly
+			decision.Changed = changedFields(previous, raw)
+			decisions = append(decisions, decision)
+			continue
+		}
+		if !seen {
+			if sameProtectFields(localFields, target) {
+				decision.Action = RatioProtectActionUnchanged
+			} else if sameProtectFields(localFields, raw) {
+				decision.Action = RatioProtectActionApply
+				decision.Changed = changedFields(raw, target)
+			} else {
+				decision.Action = RatioProtectActionSkipCustom
+			}
+			decisions = append(decisions, decision)
+			continue
+		}
+		if sameProtectFields(previous, raw) {
+			decision.Action = RatioProtectActionUnchanged
+			decisions = append(decisions, decision)
+			continue
+		}
+		decision.Changed = changedFields(previous, raw)
+		if sameProtectFields(localFields, target) {
+			decision.Action = RatioProtectActionUnchanged
+		} else {
+			decision.Action = RatioProtectActionApply
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions
 }

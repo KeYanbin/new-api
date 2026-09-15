@@ -30,6 +30,7 @@ type ratioProtectTaskSummary struct {
 	Skipped        int            `json:"skipped"`
 	Failed         int            `json:"failed"`
 	AppliedModels  []string       `json:"applied_models,omitempty"`
+	AppliedGroups  []string       `json:"applied_groups,omitempty"`
 	SkippedReasons map[string]int `json:"skipped_reasons,omitempty"`
 	Source         string         `json:"source,omitempty"`
 }
@@ -72,27 +73,33 @@ func runRatioProtectTaskOnce(ctx context.Context, _ bool, report func(processed,
 	if report != nil {
 		report(0, 1)
 	}
-	if setting.ChannelID == 0 {
+	channelIDs := setting.SelectedChannelIDs()
+	if len(channelIDs) == 0 {
 		return summary, fmt.Errorf("select an upstream channel before enabling ratio protection")
 	}
-	upstream, err := fetchProtectUpstreamData(ctx, setting)
+	upstream, sources, err := fetchProtectUpstreamData(ctx, setting)
 	if err != nil {
 		return summary, err
 	}
-	local := effectivePricingSyncData(getLocalPricingSyncData())
-	source, sourceErr := resolveProtectUpstreamDTO(setting)
-	if sourceErr == nil {
-		summary.Source = fmt.Sprintf("%s(%d)", source.Name, source.ID)
+	local := getLocalPricingSyncData()
+	sourceNames := make([]string, 0, len(sources))
+	for _, source := range sources {
+		sourceNames = append(sourceNames, fmt.Sprintf("%s(%d)", source.Name, source.ID))
 	}
-	sourceKey := ratio_setting.RatioProtectSourceKey(setting.ChannelID, strings.TrimSpace(setting.Endpoint))
+	summary.Source = strings.Join(sourceNames, ", ")
+	sourceKey := ratio_setting.RatioProtectSourceKeys(channelIDs, strings.TrimSpace(setting.Endpoint))
 	lastSeen := ratio_setting.CloneLastSeen(setting.LastSeen)
+	lastSeenGroups := ratio_setting.CloneGroupRatioLastSeen(setting.LastSeenGroupRatio)
 	if setting.LastSeenSource != "" && setting.LastSeenSource != sourceKey {
 		lastSeen = map[string]map[string]float64{}
+		lastSeenGroups = map[string]float64{}
 	}
-	decisions := ratio_setting.DecideRatioProtectActions(local, upstream, lastSeen, setting)
-	summary.Checked = len(decisions)
+	modelLocal := effectivePricingSyncData(local)
+	decisions := ratio_setting.DecideRatioProtectActions(modelLocal, effectivePricingSyncData(upstream), lastSeen, setting)
+	groupDecisions := ratio_setting.DecideGroupRatioProtectActions(local, upstream, lastSeenGroups, setting)
+	summary.Checked = len(decisions) + len(groupDecisions)
 	if report != nil {
-		report(0, max(len(decisions), 1))
+		report(0, max(summary.Checked, 1))
 	}
 
 	snapshot, err := model.GetModelPricingSnapshot(nil)
@@ -139,12 +146,52 @@ func runRatioProtectTaskOnce(ctx context.Context, _ bool, report func(processed,
 		if err := model.UpdateModelPricing(changes); err != nil {
 			return summary, err
 		}
-		summary.Applied = len(changes)
+		summary.Applied += len(changes)
 		for _, decision := range appliedDecisions {
 			nextSeen = ratio_setting.ApplyDecisionToLastSeen(nextSeen, decision)
 		}
 	}
-	if err := persistRatioProtectLastSeen(nextSeen, sourceKey); err != nil {
+
+	nextGroupSeen := ratio_setting.CloneGroupRatioLastSeen(lastSeenGroups)
+	nextGroupRatio := ratio_setting.GetGroupRatioCopy()
+	groupChanged := false
+	for _, decision := range groupDecisions {
+		switch decision.Action {
+		case ratio_setting.RatioProtectActionApply:
+			if !setting.AutoApply {
+				summary.Skipped++
+				summary.SkippedReasons["auto_apply_disabled"]++
+				continue
+			}
+			target, ok := decision.Target[ratio_setting.RatioProtectFieldGroupRatio]
+			if !ok {
+				summary.Failed++
+				continue
+			}
+			nextGroupRatio[decision.Name] = target
+			nextGroupSeen = ratio_setting.ApplyDecisionToGroupRatioLastSeen(nextGroupSeen, decision)
+			summary.AppliedGroups = append(summary.AppliedGroups, decision.Name)
+			groupChanged = true
+		case ratio_setting.RatioProtectActionUnchanged:
+			summary.Unchanged++
+			nextGroupSeen = ratio_setting.ApplyDecisionToGroupRatioLastSeen(nextGroupSeen, decision)
+		default:
+			summary.Skipped++
+			summary.SkippedReasons[decision.Action]++
+			nextGroupSeen = ratio_setting.ApplyDecisionToGroupRatioLastSeen(nextGroupSeen, decision)
+		}
+	}
+	if groupChanged {
+		encoded, marshalErr := common.Marshal(nextGroupRatio)
+		if marshalErr != nil {
+			return summary, marshalErr
+		}
+		if err := model.UpdateOption("GroupRatio", string(encoded)); err != nil {
+			return summary, err
+		}
+		summary.Applied += len(summary.AppliedGroups)
+	}
+	if err := persistRatioProtectLastSeen(nextSeen, nextGroupSeen, sourceKey); err != nil {
 		logger.LogWarn(ctx, "failed to persist ratio protect snapshot: "+err.Error())
 	}
 	if report != nil {
@@ -185,12 +232,19 @@ func buildRatioProtectPricingChange(decision ratio_setting.RatioProtectDecision,
 	}, nil
 }
 
-func persistRatioProtectLastSeen(seen map[string]map[string]float64, sourceKey string) error {
+func persistRatioProtectLastSeen(seen map[string]map[string]float64, groupSeen map[string]float64, sourceKey string) error {
 	encoded, err := common.Marshal(seen)
 	if err != nil {
 		return err
 	}
 	if err := model.UpdateOption("ratio_protect_setting.last_seen", string(encoded)); err != nil {
+		return err
+	}
+	encodedGroups, err := common.Marshal(groupSeen)
+	if err != nil {
+		return err
+	}
+	if err := model.UpdateOption("ratio_protect_setting.last_seen_group_ratio", string(encodedGroups)); err != nil {
 		return err
 	}
 	return model.UpdateOption("ratio_protect_setting.last_seen_source", sourceKey)
@@ -199,7 +253,7 @@ func persistRatioProtectLastSeen(seen map[string]map[string]float64, sourceKey s
 func buildRatioProtectNotification(summary *ratioProtectTaskSummary) string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf(
-		"上游倍率保护巡检：检查 %d 个模型，已跟随 %d 个，未变 %d 个，跳过 %d 个，失败 %d 个。",
+		"上游倍率保护巡检：检查 %d 项，已跟随 %d 项，未变 %d 项，跳过 %d 项，失败 %d 项。",
 		summary.Checked,
 		summary.Applied,
 		summary.Unchanged,
@@ -211,9 +265,16 @@ func buildRatioProtectNotification(summary *ratioProtectTaskSummary) string {
 	}
 	if len(summary.AppliedModels) > 0 {
 		display := min(len(summary.AppliedModels), ratioProtectNotifyMaxDetails)
-		builder.WriteString(fmt.Sprintf("\n已跟随：%s", strings.Join(summary.AppliedModels[:display], ", ")))
+		builder.WriteString(fmt.Sprintf("\n已跟随模型：%s", strings.Join(summary.AppliedModels[:display], ", ")))
 		if len(summary.AppliedModels) > display {
 			builder.WriteString(fmt.Sprintf("（其余 %d 个已省略）", len(summary.AppliedModels)-display))
+		}
+	}
+	if len(summary.AppliedGroups) > 0 {
+		display := min(len(summary.AppliedGroups), ratioProtectNotifyMaxDetails)
+		builder.WriteString(fmt.Sprintf("\n已跟随分组：%s", strings.Join(summary.AppliedGroups[:display], ", ")))
+		if len(summary.AppliedGroups) > display {
+			builder.WriteString(fmt.Sprintf("（其余 %d 个已省略）", len(summary.AppliedGroups)-display))
 		}
 	}
 	return builder.String()

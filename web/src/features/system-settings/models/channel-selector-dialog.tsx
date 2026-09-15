@@ -60,6 +60,7 @@ type ChannelSelectorDialogProps = {
   channelEndpoints: Record<number, string>
   onChannelEndpointsChange: (endpoints: Record<number, string>) => void
   onConfirm: (selectedIds: number[]) => void
+  showEndpointColumn?: boolean
 }
 
 // Synthesized presets from `controller/ratio_sync.go` always carry stable
@@ -79,6 +80,7 @@ export function ChannelSelectorDialog({
   channelEndpoints,
   onChannelEndpointsChange,
   onConfirm,
+  showEndpointColumn = true,
 }: ChannelSelectorDialogProps) {
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
@@ -219,62 +221,68 @@ export function ChannelSelectorDialog({
           )
         },
       },
-      {
-        id: 'endpoint',
-        header: t('Sync Endpoint'),
-        size: 460,
-        minSize: 360,
-        cell: ({ row }) => {
-          const channel = row.original
-          const currentEndpoint =
-            channelEndpoints[channel.id] || DEFAULT_ENDPOINT
-          const endpointType = getEndpointType(currentEndpoint)
+      ...(showEndpointColumn
+        ? [
+            {
+              id: 'endpoint',
+              header: t('Sync Endpoint'),
+              size: 460,
+              minSize: 360,
+              cell: ({ row }) => {
+                const channel = row.original
+                const currentEndpoint =
+                  channelEndpoints[channel.id] || DEFAULT_ENDPOINT
+                const endpointType = getEndpointType(currentEndpoint)
 
-          const handleTypeChange = (value: string) => {
-            if (value === 'custom') {
-              updateEndpoint(channel.id, '')
-            } else {
-              updateEndpoint(channel.id, value)
-            }
-          }
+                const handleTypeChange = (value: string) => {
+                  if (value === 'custom') {
+                    updateEndpoint(channel.id, '')
+                  } else {
+                    updateEndpoint(channel.id, value)
+                  }
+                }
 
-          return (
-            <div className='flex min-w-0 items-center gap-2'>
-              <Select
-                items={ENDPOINT_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: option.label,
-                }))}
-                value={endpointType}
-                onValueChange={(v) => v !== null && handleTypeChange(v)}
-              >
-                <SelectTrigger className='h-8 w-32'>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent alignItemWithTrigger={false}>
-                  <SelectGroup>
-                    {ENDPOINT_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              {endpointType === 'custom' && (
-                <Input
-                  value={currentEndpoint}
-                  onChange={(e) => updateEndpoint(channel.id, e.target.value)}
-                  placeholder={t('/your/endpoint')}
-                  className='h-8 min-w-0 flex-1 font-mono text-xs'
-                />
-              )}
-            </div>
-          )
-        },
-      },
+                return (
+                  <div className='flex min-w-0 items-center gap-2'>
+                    <Select
+                      items={ENDPOINT_OPTIONS.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                      }))}
+                      value={endpointType}
+                      onValueChange={(v) => v !== null && handleTypeChange(v)}
+                    >
+                      <SelectTrigger className='h-8 w-32'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {ENDPOINT_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    {endpointType === 'custom' && (
+                      <Input
+                        value={currentEndpoint}
+                        onChange={(e) =>
+                          updateEndpoint(channel.id, e.target.value)
+                        }
+                        placeholder={t('/your/endpoint')}
+                        className='h-8 min-w-0 flex-1 font-mono text-xs'
+                      />
+                    )}
+                  </div>
+                )
+              },
+            } satisfies ColumnDef<UpstreamChannel>,
+          ]
+        : []),
     ],
-    [channelEndpoints, t, updateEndpoint]
+    [channelEndpoints, showEndpointColumn, t, updateEndpoint]
   )
 
   const filteredChannels = useMemo(() => {

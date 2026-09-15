@@ -370,11 +370,13 @@ export type BillingSettings = {
   'ratio_protect_setting.auto_apply': boolean
   'ratio_protect_setting.interval_minutes': number
   'ratio_protect_setting.channel_id': number
+  'ratio_protect_setting.channel_ids': number[]
   'ratio_protect_setting.endpoint': string
   'ratio_protect_setting.markup_mode': 'add' | 'multiply'
   'ratio_protect_setting.markup_value': number
   'ratio_protect_setting.protect_model_ratio': boolean
   'ratio_protect_setting.protect_model_price': boolean
+  'ratio_protect_setting.protect_group_ratio': boolean
   'ratio_protect_setting.skip_zero_upstream': boolean
   'ratio_protect_setting.max_change_factor': number
   'ratio_protect_setting.notify': boolean

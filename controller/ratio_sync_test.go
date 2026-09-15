@@ -185,3 +185,36 @@ func toFloat(value any) float64 {
 		return 0
 	}
 }
+
+func TestParseUpstreamRatioBodyKeepsSiblingGroupRatio(t *testing.T) {
+	body, err := common.Marshal(map[string]any{
+		"success": true,
+		"data": []map[string]any{
+			{"model_name": "gpt-5", "model_ratio": 2.5, "quota_type": 0},
+		},
+		"group_ratio": map[string]any{"gptplus": 0.1, "gptproo": 0.2},
+	})
+	require.NoError(t, err)
+	data, err := parseUpstreamRatioBody(body)
+	require.NoError(t, err)
+	assert.Equal(t, 2.5, toFloat(valueMap(data["model_ratio"])["gpt-5"]))
+	assert.Equal(t, 0.1, toFloat(valueMap(data["group_ratio"])["gptplus"]))
+	assert.Equal(t, 0.2, toFloat(valueMap(data["group_ratio"])["gptproo"]))
+}
+
+func TestMergeProtectUpstreamDataKeepsFirstSourceWins(t *testing.T) {
+	merged := mergeProtectUpstreamData([]map[string]any{
+		{
+			"model_ratio": map[string]any{"gpt-5": 2.5},
+			"group_ratio": map[string]any{"gptplus": 0.1},
+		},
+		{
+			"model_ratio": map[string]any{"gpt-5": 9.0, "claude": 3.0},
+			"group_ratio": map[string]any{"gptplus": 0.9, "gptproo": 0.2},
+		},
+	})
+	assert.Equal(t, 2.5, toFloat(valueMap(merged["model_ratio"])["gpt-5"]))
+	assert.Equal(t, 3.0, toFloat(valueMap(merged["model_ratio"])["claude"]))
+	assert.Equal(t, 0.1, toFloat(valueMap(merged["group_ratio"])["gptplus"]))
+	assert.Equal(t, 0.2, toFloat(valueMap(merged["group_ratio"])["gptproo"]))
+}

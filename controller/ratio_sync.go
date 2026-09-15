@@ -137,6 +137,7 @@ func getLocalPricingSyncData() map[string]any {
 	data["image_ratio"] = ratio_setting.GetImageRatioCopy()
 	data["audio_ratio"] = ratio_setting.GetAudioRatioCopy()
 	data["audio_completion_ratio"] = ratio_setting.GetAudioCompletionRatioCopy()
+	data[ratio_setting.RatioProtectFieldGroupRatio] = ratio_setting.GetGroupRatioCopy()
 	return data
 }
 
@@ -347,11 +348,48 @@ func fetchOneUpstreamRatio(parent context.Context, client *http.Client, chItem d
 	return parseUpstreamRatioBody(bodyBytes)
 }
 
+func parseGroupRatioMap(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var values map[string]any
+	if err := common.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	result := make(map[string]any, len(values))
+	for name, value := range values {
+		number, ok := asFloat64(value)
+		if !ok || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+			continue
+		}
+		result[name] = number
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func attachParsedGroupRatio(data map[string]any, raw json.RawMessage) map[string]any {
+	groupRatio := parseGroupRatioMap(raw)
+	if len(groupRatio) == 0 {
+		return data
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	if len(valueMap(data[ratio_setting.RatioProtectFieldGroupRatio])) == 0 {
+		data[ratio_setting.RatioProtectFieldGroupRatio] = groupRatio
+	}
+	return data
+}
+
 func parseUpstreamRatioBody(bodyBytes []byte) (map[string]any, error) {
 	var body struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-		Message string          `json:"message"`
+		Success    bool            `json:"success"`
+		Data       json.RawMessage `json:"data"`
+		Message    string          `json:"message"`
+		GroupRatio json.RawMessage `json:"group_ratio"`
 	}
 	if err := common.Unmarshal(bodyBytes, &body); err != nil {
 		return nil, err
@@ -363,7 +401,7 @@ func parseUpstreamRatioBody(bodyBytes []byte) (map[string]any, error) {
 	if err := common.Unmarshal(body.Data, &type1Data); err == nil {
 		for _, rt := range pricingSyncFields {
 			if _, ok := type1Data[rt]; ok {
-				return type1Data, nil
+				return attachParsedGroupRatio(type1Data, body.GroupRatio), nil
 			}
 		}
 	}
@@ -474,15 +512,12 @@ func parseUpstreamRatioBody(bodyBytes []byte) (map[string]any, error) {
 	if len(billingExprMap) > 0 {
 		converted[billing_setting.BillingExprField] = valueMap(billingExprMap)
 	}
-	return converted, nil
+	return attachParsedGroupRatio(converted, body.GroupRatio), nil
 }
 
-func resolveProtectUpstreamDTO(setting *ratio_setting.RatioProtectSetting) (dto.UpstreamDTO, error) {
-	if setting == nil {
-		return dto.UpstreamDTO{}, fmt.Errorf("ratio protect setting is required")
-	}
-	endpoint := strings.TrimSpace(setting.Endpoint)
-	switch setting.ChannelID {
+func resolveProtectUpstreamDTO(channelID int, endpoint string) (dto.UpstreamDTO, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	switch channelID {
 	case officialRatioPresetID:
 		if endpoint == "" {
 			endpoint = "/llm-metadata/api/newapi/ratio_config-v1-base.json"
@@ -494,10 +529,10 @@ func resolveProtectUpstreamDTO(setting *ratio_setting.RatioProtectSetting) (dto.
 		}
 		return dto.UpstreamDTO{ID: modelsDevPresetID, Name: modelsDevPresetName, BaseURL: modelsDevPresetBaseURL, Endpoint: endpoint}, nil
 	}
-	if setting.ChannelID == 0 {
+	if channelID == 0 {
 		return dto.UpstreamDTO{}, fmt.Errorf("select an upstream channel before enabling ratio protection")
 	}
-	channel, err := model.GetChannelById(setting.ChannelID, true)
+	channel, err := model.GetChannelById(channelID, true)
 	if err != nil {
 		return dto.UpstreamDTO{}, fmt.Errorf("failed to load protect channel: %w", err)
 	}
@@ -515,16 +550,75 @@ func resolveProtectUpstreamDTO(setting *ratio_setting.RatioProtectSetting) (dto.
 	return dto.UpstreamDTO{ID: channel.Id, Name: channel.Name, BaseURL: base, Endpoint: endpoint}, nil
 }
 
-func fetchProtectUpstreamData(ctx context.Context, setting *ratio_setting.RatioProtectSetting) (map[string]any, error) {
-	upstream, err := resolveProtectUpstreamDTO(setting)
-	if err != nil {
-		return nil, err
+func resolveProtectUpstreamDTOs(setting *ratio_setting.RatioProtectSetting) ([]dto.UpstreamDTO, error) {
+	if setting == nil {
+		return nil, fmt.Errorf("ratio protect setting is required")
 	}
-	data, err := fetchOneUpstreamRatio(ctx, newUpstreamRatioHTTPClient(), upstream, defaultTimeoutSeconds)
-	if err != nil {
-		return nil, err
+	channelIDs := setting.SelectedChannelIDs()
+	if len(channelIDs) == 0 {
+		return nil, fmt.Errorf("select an upstream channel before enabling ratio protection")
 	}
-	return effectivePricingSyncData(data), nil
+	endpoint := strings.TrimSpace(setting.Endpoint)
+	upstreams := make([]dto.UpstreamDTO, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		upstream, err := resolveProtectUpstreamDTO(channelID, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		upstreams = append(upstreams, upstream)
+	}
+	return upstreams, nil
+}
+
+func mergeProtectUpstreamData(sources []map[string]any) map[string]any {
+	merged := map[string]any{}
+	for _, source := range sources {
+		for field, raw := range source {
+			entries := valueMap(raw)
+			if len(entries) == 0 {
+				continue
+			}
+			current := valueMap(merged[field])
+			if current == nil {
+				current = map[string]any{}
+			}
+			for name, value := range entries {
+				if _, exists := current[name]; exists {
+					continue
+				}
+				current[name] = value
+			}
+			merged[field] = current
+		}
+	}
+	return merged
+}
+
+func fetchProtectUpstreamData(ctx context.Context, setting *ratio_setting.RatioProtectSetting) (map[string]any, []dto.UpstreamDTO, error) {
+	upstreams, err := resolveProtectUpstreamDTOs(setting)
+	if err != nil {
+		return nil, nil, err
+	}
+	client := newUpstreamRatioHTTPClient()
+	sources := make([]map[string]any, 0, len(upstreams))
+	succeeded := make([]dto.UpstreamDTO, 0, len(upstreams))
+	var failures []string
+	for _, upstream := range upstreams {
+		data, fetchErr := fetchOneUpstreamRatio(ctx, client, upstream, defaultTimeoutSeconds)
+		if fetchErr != nil {
+			failures = append(failures, fmt.Sprintf("%s(%d): %s", upstream.Name, upstream.ID, fetchErr.Error()))
+			continue
+		}
+		sources = append(sources, data)
+		succeeded = append(succeeded, upstream)
+	}
+	if len(sources) == 0 {
+		return nil, upstreams, fmt.Errorf("all protect sources failed: %s", strings.Join(failures, "; "))
+	}
+	if len(failures) > 0 {
+		logger.LogWarn(ctx, "ratio protect skipped failed sources: "+strings.Join(failures, "; "))
+	}
+	return mergeProtectUpstreamData(sources), succeeded, nil
 }
 
 func FetchUpstreamRatios(c *gin.Context) {

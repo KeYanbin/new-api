@@ -117,3 +117,45 @@ func TestDecideRatioProtectSkipsAnomalousJumps(t *testing.T) {
 	require.Len(t, decisions, 1)
 	assert.Equal(t, RatioProtectActionSkipAnomaly, decisions[0].Action)
 }
+
+func TestSelectedChannelIDsFallsBackToChannelID(t *testing.T) {
+	setting := &RatioProtectSetting{ChannelID: 7}
+	assert.Equal(t, []int{7}, setting.SelectedChannelIDs())
+	setting.ChannelIDs = []int{3, 3, 1, 0, -100}
+	assert.Equal(t, []int{3, 1, -100}, setting.SelectedChannelIDs())
+	assert.Equal(t, "-100,1,3|/api/pricing", RatioProtectSourceKeys(setting.ChannelIDs, "/api/pricing"))
+}
+
+func TestApplyProtectToPricingSyncDataAddsGroupRatioMarkup(t *testing.T) {
+	data := map[string]any{
+		"group_ratio": map[string]any{"gptplus": 0.1, "free": 0.0},
+	}
+	setting := protectSetting()
+	setting.ProtectGroupRatio = true
+	protected := ApplyProtectToPricingSyncDataWithSetting(data, setting)
+	assert.Equal(t, 0.2, protected["group_ratio"].(map[string]any)["gptplus"])
+	assert.Equal(t, 0.0, protected["group_ratio"].(map[string]any)["free"])
+}
+
+func TestDecideGroupRatioProtectFollowsUpstreamChange(t *testing.T) {
+	setting := protectSetting()
+	setting.ProtectGroupRatio = true
+	local := map[string]any{"group_ratio": map[string]any{"gptplus": 0.2}}
+	upstream := map[string]any{"group_ratio": map[string]any{"gptplus": 0.2}}
+	lastSeen := map[string]float64{"gptplus": 0.1}
+	decisions := DecideGroupRatioProtectActions(local, upstream, lastSeen, setting)
+	require.Len(t, decisions, 1)
+	assert.Equal(t, RatioProtectActionApply, decisions[0].Action)
+	assert.Equal(t, 0.3, decisions[0].Target[RatioProtectFieldGroupRatio])
+}
+
+func TestDecideGroupRatioProtectKeepsCustomUntilUpstreamChanges(t *testing.T) {
+	setting := protectSetting()
+	setting.ProtectGroupRatio = true
+	local := map[string]any{"group_ratio": map[string]any{"gptplus": 0.8}}
+	upstream := map[string]any{"group_ratio": map[string]any{"gptplus": 0.1}}
+	lastSeen := map[string]float64{"gptplus": 0.1}
+	decisions := DecideGroupRatioProtectActions(local, upstream, lastSeen, setting)
+	require.Len(t, decisions, 1)
+	assert.Equal(t, RatioProtectActionUnchanged, decisions[0].Action)
+}
