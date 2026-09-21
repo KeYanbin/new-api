@@ -87,7 +87,7 @@ func runRatioProtectTaskOnce(ctx context.Context, _ bool, report func(processed,
 		sourceNames = append(sourceNames, fmt.Sprintf("%s(%d)", source.Name, source.ID))
 	}
 	summary.Source = strings.Join(sourceNames, ", ")
-	sourceKey := ratio_setting.RatioProtectSourceKeys(channelIDs, strings.TrimSpace(setting.Endpoint))
+	sourceKey := ratio_setting.RatioProtectSourceKeysWithGroups(channelIDs, strings.TrimSpace(setting.Endpoint), setting.SelectedSyncGroups())
 	lastSeen := ratio_setting.CloneLastSeen(setting.LastSeen)
 	lastSeenGroups := ratio_setting.CloneGroupRatioLastSeen(setting.LastSeenGroupRatio)
 	if setting.LastSeenSource != "" && setting.LastSeenSource != sourceKey {

@@ -134,6 +134,9 @@ const BILLING_SECTIONS = [
             channel_id: settings['ratio_protect_setting.channel_id'],
             channel_ids: channelIds,
             endpoint: settings['ratio_protect_setting.endpoint'],
+            has_auth_token: settings['ratio_protect_setting.has_auth_token'],
+            auth_token: '',
+            sync_groups: settings['ratio_protect_setting.sync_groups'] ?? [],
             markup_mode: settings['ratio_protect_setting.markup_mode'],
             markup_value: settings['ratio_protect_setting.markup_value'],
             protect_model_ratio:

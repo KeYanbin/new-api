@@ -124,6 +124,33 @@ func TestSelectedChannelIDsFallsBackToChannelID(t *testing.T) {
 	setting.ChannelIDs = []int{3, 3, 1, 0, -100}
 	assert.Equal(t, []int{3, 1, -100}, setting.SelectedChannelIDs())
 	assert.Equal(t, "-100,1,3|/api/pricing", RatioProtectSourceKeys(setting.ChannelIDs, "/api/pricing"))
+	assert.Equal(t, "-100,1,3|/api/pricing|gpt plus,gpt pro", RatioProtectSourceKeysWithGroups(setting.ChannelIDs, "/api/pricing", []string{"gpt pro", " gpt plus ", "gpt plus", ""}))
+}
+
+func TestFilterPricingSyncDataByGroupsKeepsSelectedModelsAndGroupRatios(t *testing.T) {
+	data := map[string]any{
+		"model_ratio": map[string]any{"gpt-plus": 0.2, "gpt-pro": 0.3, "other": 0.4},
+		"model_price": map[string]any{"gpt-plus": 1.0, "other": 2.0},
+		"group_ratio": map[string]any{"gpt plus": 0.2, "gpt pro": 0.3, "special": 0.18},
+	}
+	filtered := FilterPricingSyncDataByGroups(data, []string{"gpt plus"}, func(name string) []string {
+		switch name {
+		case "gpt-plus":
+			return []string{"gpt plus"}
+		case "gpt-pro":
+			return []string{"gpt pro"}
+		case "other":
+			return []string{"special"}
+		default:
+			return nil
+		}
+	})
+	assert.Equal(t, 0.2, filtered["model_ratio"].(map[string]any)["gpt-plus"])
+	assert.NotContains(t, filtered["model_ratio"].(map[string]any), "gpt-pro")
+	assert.NotContains(t, filtered["model_ratio"].(map[string]any), "other")
+	assert.Equal(t, 0.2, filtered["group_ratio"].(map[string]any)["gpt plus"])
+	assert.NotContains(t, filtered["group_ratio"].(map[string]any), "gpt pro")
+	assert.NotContains(t, filtered["group_ratio"].(map[string]any), "special")
 }
 
 func TestApplyProtectToPricingSyncDataAddsGroupRatioMarkup(t *testing.T) {

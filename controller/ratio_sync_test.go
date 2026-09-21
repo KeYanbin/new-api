@@ -1,19 +1,23 @@
 package controller
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestPricingSyncExpressionPriority(t *testing.T) {
@@ -217,4 +221,103 @@ func TestMergeProtectUpstreamDataKeepsFirstSourceWins(t *testing.T) {
 	assert.Equal(t, 3.0, toFloat(valueMap(merged["model_ratio"])["claude"]))
 	assert.Equal(t, 0.1, toFloat(valueMap(merged["group_ratio"])["gptplus"]))
 	assert.Equal(t, 0.2, toFloat(valueMap(merged["group_ratio"])["gptproo"]))
+}
+
+func TestFetchOneUpstreamRatioAttachesChannelAuthorization(t *testing.T) {
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	model.DB, model.LOG_DB = db, db
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+	})
+
+	received := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("Authorization")
+		encoded, err := common.Marshal(map[string]any{
+			"success": true,
+			"data":    []map[string]any{{"model_name": "gpt-5", "model_ratio": 2.5, "quota_type": 0}},
+		})
+		require.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(encoded)
+	}))
+	t.Cleanup(server.Close)
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Name:    "protect-source",
+		Type:    1,
+		Key:     "sk-upstream-pricing",
+		Status:  common.ChannelStatusEnabled,
+		BaseURL: &baseURL,
+		Models:  "gpt-5",
+		Group:   "default",
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	data, err := fetchOneUpstreamRatio(context.Background(), newUpstreamRatioHTTPClient(), dto.UpstreamDTO{
+		ID:       channel.Id,
+		Name:     channel.Name,
+		BaseURL:  server.URL,
+		Endpoint: "/api/pricing",
+	}, 5)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer sk-upstream-pricing", <-received)
+	assert.Equal(t, 2.5, toFloat(valueMap(data["model_ratio"])["gpt-5"]))
+
+	_, err = fetchOneUpstreamRatio(context.Background(), newUpstreamRatioHTTPClient(), dto.UpstreamDTO{
+		Name:     "anonymous",
+		BaseURL:  server.URL,
+		Endpoint: "/api/pricing",
+	}, 5)
+	require.NoError(t, err)
+	assert.Empty(t, <-received)
+}
+
+func TestFetchOneUpstreamRatioWithAuthPrefersDedicatedToken(t *testing.T) {
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	model.DB, model.LOG_DB = db, db
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+	})
+
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("Authorization")
+		encoded, err := common.Marshal(map[string]any{
+			"success": true,
+			"data":    []map[string]any{{"model_name": "gpt-5", "model_ratio": 2.5, "quota_type": 0}},
+		})
+		require.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(encoded)
+	}))
+	t.Cleanup(server.Close)
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Name:    "protect-source",
+		Type:    1,
+		Key:     "sk-upstream-pricing",
+		Status:  common.ChannelStatusEnabled,
+		BaseURL: &baseURL,
+		Models:  "gpt-5",
+		Group:   "default",
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	_, err = fetchOneUpstreamRatioWithAuth(context.Background(), newUpstreamRatioHTTPClient(), dto.UpstreamDTO{
+		ID:       channel.Id,
+		Name:     channel.Name,
+		BaseURL:  server.URL,
+		Endpoint: "/api/pricing",
+	}, 5, "dashboard-jwt")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer dashboard-jwt", <-received)
 }

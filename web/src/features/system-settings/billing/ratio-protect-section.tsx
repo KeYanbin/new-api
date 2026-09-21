@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import * as z from 'zod'
 
+import { MultiSelect } from '@/components/multi-select'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -45,6 +46,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { getGroups } from '@/features/users/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -78,6 +80,9 @@ const createRatioProtectSchema = (t: (key: string) => string) =>
         channel_id: z.coerce.number().int(),
         channel_ids: z.array(z.number().int()),
         endpoint: z.string(),
+        has_auth_token: z.boolean(),
+        auth_token: z.string(),
+        sync_groups: z.array(z.string()),
         markup_mode: z.enum(markupModes),
         markup_value: z.coerce.number().min(0),
         protect_model_ratio: z.boolean(),
@@ -132,7 +137,15 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
     queryKey: ['upstream-channels'],
     queryFn: async () => requireServerSuccess(await getUpstreamChannels()),
   })
+  const { data: groupsData } = useQuery({
+    queryKey: ['groups'],
+    queryFn: async () => requireServerSuccess(await getGroups()),
+  })
   const channels = channelsData?.data ?? []
+  const groupOptions = (groupsData?.data ?? []).map((group) => ({
+    label: group,
+    value: group,
+  }))
   const triggerMutation = useMutation({
     mutationFn: async () =>
       requireServerSuccess(await triggerRatioProtectTask()),
@@ -169,11 +182,39 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
             value: channelIds[0] ?? 0,
           })
         }
+        const syncGroupsChanged = Object.keys(changedFields).some(
+          (key) =>
+            key === 'ratio_protect_setting.sync_groups' ||
+            key.startsWith('ratio_protect_setting.sync_groups.')
+        )
+        if (syncGroupsChanged) {
+          await updateOption.mutateAsync({
+            key: 'ratio_protect_setting.sync_groups',
+            value: JSON.stringify(data.ratio_protect_setting.sync_groups),
+          })
+        }
+        const authToken = data.ratio_protect_setting.auth_token.trim()
+        if (
+          Object.prototype.hasOwnProperty.call(
+            changedFields,
+            'ratio_protect_setting.auth_token'
+          ) &&
+          authToken !== ''
+        ) {
+          await updateOption.mutateAsync({
+            key: 'ratio_protect_setting.auth_token',
+            value: authToken,
+          })
+        }
         for (const [key, value] of Object.entries(changedFields)) {
           if (
             key === 'ratio_protect_setting.channel_ids' ||
             key.startsWith('ratio_protect_setting.channel_ids.') ||
-            key === 'ratio_protect_setting.channel_id'
+            key === 'ratio_protect_setting.channel_id' ||
+            key === 'ratio_protect_setting.sync_groups' ||
+            key.startsWith('ratio_protect_setting.sync_groups.') ||
+            key === 'ratio_protect_setting.auth_token' ||
+            key === 'ratio_protect_setting.has_auth_token'
           ) {
             continue
           }
@@ -322,6 +363,55 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                     <FormDescription>
                       {t(
                         'Use /api/pricing, /api/ratio_config, openrouter, or a full URL.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='ratio_protect_setting.auth_token'
+                render={({ field }) => (
+                  <FormItem className='sm:col-span-2'>
+                    <FormLabel>{t('Upstream auth token')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='password'
+                        autoComplete='off'
+                        value={field.value}
+                        onChange={field.onChange}
+                        placeholder={t('Enter new token to update')}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {defaultValues.has_auth_token
+                        ? t('Leave blank to keep the existing credential')
+                        : t(
+                            'Dashboard login token or personal access token for upstream /api/pricing. Channel keys are not accepted by that endpoint.'
+                          )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='ratio_protect_setting.sync_groups'
+                render={({ field }) => (
+                  <FormItem className='sm:col-span-2'>
+                    <FormLabel>{t('Sync groups')}</FormLabel>
+                    <FormControl>
+                      <MultiSelect
+                        options={groupOptions}
+                        selected={field.value}
+                        onChange={field.onChange}
+                        placeholder={t('Select groups to sync')}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Only follow models enabled for these groups, and only these group ratios. Leave empty to sync every group from the listen sources.'
                       )}
                     </FormDescription>
                     <FormMessage />

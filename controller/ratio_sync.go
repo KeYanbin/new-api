@@ -275,6 +275,10 @@ func newUpstreamRatioHTTPClient() *http.Client {
 }
 
 func fetchOneUpstreamRatio(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int) (map[string]any, error) {
+	return fetchOneUpstreamRatioWithAuth(parent, client, chItem, timeoutSeconds, "")
+}
+
+func fetchOneUpstreamRatioWithAuth(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int, authToken string) (map[string]any, error) {
 	isOpenRouter := chItem.Endpoint == "openrouter"
 	endpoint := chItem.Endpoint
 	var fullURL string
@@ -298,21 +302,28 @@ func fetchOneUpstreamRatio(parent context.Context, client *http.Client, chItem d
 	if err != nil {
 		return nil, err
 	}
-	if isOpenRouter && chItem.ID != 0 {
+	authToken = strings.TrimSpace(authToken)
+	if isOpenRouter && chItem.ID == 0 && authToken == "" {
+		return nil, fmt.Errorf("OpenRouter requires a valid channel with API key")
+	}
+	sendDedicatedAuth := authToken != "" && chItem.ID > 0 && !isModelsDev
+	if sendDedicatedAuth {
+		httpReq.Header.Set("Authorization", "Bearer "+authToken)
+	} else if chItem.ID > 0 && !isModelsDev && model.DB != nil {
 		dbCh, err := model.GetChannelById(chItem.ID, true)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get channel key: %w", err)
-		}
-		key, _, apiErr := dbCh.GetNextEnabledKey()
-		if apiErr != nil {
-			return nil, fmt.Errorf("failed to get enabled channel key: %s", apiErr.Error())
-		}
-		if strings.TrimSpace(key) == "" {
+			if isOpenRouter {
+				return nil, fmt.Errorf("failed to get channel key: %w", err)
+			}
+		} else if key, _, apiErr := dbCh.GetNextEnabledKey(); apiErr != nil {
+			if isOpenRouter {
+				return nil, fmt.Errorf("failed to get enabled channel key: %s", apiErr.Error())
+			}
+		} else if key = strings.TrimSpace(key); key != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+key)
+		} else if isOpenRouter {
 			return nil, fmt.Errorf("no API key configured for this channel")
 		}
-		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
-	} else if isOpenRouter {
-		return nil, fmt.Errorf("OpenRouter requires a valid channel with API key")
 	}
 
 	var resp *http.Response
@@ -603,8 +614,9 @@ func fetchProtectUpstreamData(ctx context.Context, setting *ratio_setting.RatioP
 	sources := make([]map[string]any, 0, len(upstreams))
 	succeeded := make([]dto.UpstreamDTO, 0, len(upstreams))
 	var failures []string
+	authToken := strings.TrimSpace(setting.AuthToken)
 	for _, upstream := range upstreams {
-		data, fetchErr := fetchOneUpstreamRatio(ctx, client, upstream, defaultTimeoutSeconds)
+		data, fetchErr := fetchOneUpstreamRatioWithAuth(ctx, client, upstream, defaultTimeoutSeconds, authToken)
 		if fetchErr != nil {
 			failures = append(failures, fmt.Sprintf("%s(%d): %s", upstream.Name, upstream.ID, fetchErr.Error()))
 			continue
@@ -618,7 +630,8 @@ func fetchProtectUpstreamData(ctx context.Context, setting *ratio_setting.RatioP
 	if len(failures) > 0 {
 		logger.LogWarn(ctx, "ratio protect skipped failed sources: "+strings.Join(failures, "; "))
 	}
-	return mergeProtectUpstreamData(sources), succeeded, nil
+	merged := mergeProtectUpstreamData(sources)
+	return ratio_setting.FilterPricingSyncDataByGroups(merged, setting.SelectedSyncGroups(), model.GetModelEnableGroups), succeeded, nil
 }
 
 func FetchUpstreamRatios(c *gin.Context) {

@@ -45,6 +45,8 @@ type RatioProtectSetting struct {
 	ChannelID          int                           `json:"channel_id"`
 	ChannelIDs         []int                         `json:"channel_ids"`
 	Endpoint           string                        `json:"endpoint"`
+	AuthToken          string                        `json:"auth_token"`
+	SyncGroups         []string                      `json:"sync_groups"`
 	MarkupMode         string                        `json:"markup_mode"`
 	MarkupValue        float64                       `json:"markup_value"`
 	ProtectModelRatio  bool                          `json:"protect_model_ratio"`
@@ -88,13 +90,22 @@ func RatioProtectSourceKey(channelID int, endpoint string) string {
 }
 
 func RatioProtectSourceKeys(channelIDs []int, endpoint string) string {
+	return RatioProtectSourceKeysWithGroups(channelIDs, endpoint, nil)
+}
+
+func RatioProtectSourceKeysWithGroups(channelIDs []int, endpoint string, groups []string) string {
 	ids := uniqueChannelIDs(channelIDs)
 	slices.Sort(ids)
 	parts := make([]string, 0, len(ids))
 	for _, id := range ids {
 		parts = append(parts, strconv.Itoa(id))
 	}
-	return strings.Join(parts, ",") + "|" + strings.TrimSpace(endpoint)
+	key := strings.Join(parts, ",") + "|" + strings.TrimSpace(endpoint)
+	selected := uniqueSyncGroups(groups)
+	if len(selected) == 0 {
+		return key
+	}
+	return key + "|" + strings.Join(selected, ",")
 }
 
 func (setting *RatioProtectSetting) SelectedChannelIDs() []int {
@@ -111,6 +122,17 @@ func (setting *RatioProtectSetting) SelectedChannelIDs() []int {
 	return nil
 }
 
+func (setting *RatioProtectSetting) SelectedSyncGroups() []string {
+	if setting == nil {
+		return nil
+	}
+	return uniqueSyncGroups(setting.SyncGroups)
+}
+
+func (setting *RatioProtectSetting) HasAuthToken() bool {
+	return setting != nil && strings.TrimSpace(setting.AuthToken) != ""
+}
+
 func uniqueChannelIDs(values []int) []int {
 	seen := make(map[int]struct{}, len(values))
 	result := make([]int, 0, len(values))
@@ -124,6 +146,24 @@ func uniqueChannelIDs(values []int) []int {
 		seen[value] = struct{}{}
 		result = append(result, value)
 	}
+	return result
+}
+
+func uniqueSyncGroups(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	slices.Sort(result)
 	return result
 }
 
@@ -162,6 +202,8 @@ func normalizeRatioProtectSetting(setting *RatioProtectSetting) {
 	if len(setting.ChannelIDs) > 0 {
 		setting.ChannelID = setting.ChannelIDs[0]
 	}
+	setting.AuthToken = strings.TrimSpace(setting.AuthToken)
+	setting.SyncGroups = uniqueSyncGroups(setting.SyncGroups)
 }
 
 func ValidateRatioProtectOption(key, value string) error {
@@ -189,6 +231,13 @@ func ValidateRatioProtectOption(key, value string) error {
 		var ids []int
 		if err := common.UnmarshalJsonStr(value, &ids); err != nil {
 			return fmt.Errorf("channel_ids must be a JSON array of integers")
+		}
+	case "ratio_protect_setting.auth_token":
+		return nil
+	case "ratio_protect_setting.sync_groups":
+		var groups []string
+		if err := common.UnmarshalJsonStr(value, &groups); err != nil {
+			return fmt.Errorf("sync_groups must be a JSON array of strings")
 		}
 	case "ratio_protect_setting.endpoint":
 		trimmed := strings.TrimSpace(value)
@@ -631,6 +680,75 @@ func ApplyDecisionToGroupRatioLastSeen(seen map[string]float64, decision RatioPr
 		seen[decision.Name] = raw
 	}
 	return seen
+}
+
+func FilterPricingSyncDataByGroups(data map[string]any, groups []string, modelGroups func(string) []string) map[string]any {
+	selected := uniqueSyncGroups(groups)
+	if len(selected) == 0 {
+		return data
+	}
+	allowed := make(map[string]struct{}, len(selected))
+	for _, group := range selected {
+		allowed[group] = struct{}{}
+	}
+	result := clonePricingSyncMap(data)
+	for _, field := range []string{
+		RatioProtectFieldModelRatio,
+		RatioProtectFieldModelPrice,
+		"completion_ratio",
+		"cache_ratio",
+		"create_cache_ratio",
+		"image_ratio",
+		"audio_ratio",
+		"audio_completion_ratio",
+		"billing_mode",
+		"billing_expr",
+	} {
+		entries := pricingSyncFieldMap(result, field)
+		if len(entries) == 0 {
+			continue
+		}
+		filtered := make(map[string]any, len(entries))
+		for name, value := range entries {
+			if modelMatchesProtectGroups(name, allowed, modelGroups) {
+				filtered[name] = value
+			}
+		}
+		result[field] = filtered
+	}
+	groupEntries := pricingSyncFieldMap(result, RatioProtectFieldGroupRatio)
+	if len(groupEntries) > 0 {
+		filtered := make(map[string]any, len(selected))
+		for name, value := range groupEntries {
+			if _, ok := allowed[name]; ok {
+				filtered[name] = value
+			}
+		}
+		result[RatioProtectFieldGroupRatio] = filtered
+	}
+	return result
+}
+
+func modelMatchesProtectGroups(name string, allowed map[string]struct{}, modelGroups func(string) []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	if modelGroups == nil {
+		return true
+	}
+	groups := modelGroups(name)
+	if len(groups) == 0 {
+		return false
+	}
+	for _, group := range groups {
+		if group == "all" {
+			return true
+		}
+		if _, ok := allowed[group]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func groupRatioValueMap(data map[string]any) map[string]float64 {

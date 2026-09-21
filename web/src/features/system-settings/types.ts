@@ -372,6 +372,8 @@ export type BillingSettings = {
   'ratio_protect_setting.channel_id': number
   'ratio_protect_setting.channel_ids': number[]
   'ratio_protect_setting.endpoint': string
+  'ratio_protect_setting.has_auth_token': boolean
+  'ratio_protect_setting.sync_groups': string[]
   'ratio_protect_setting.markup_mode': 'add' | 'multiply'
   'ratio_protect_setting.markup_value': number
   'ratio_protect_setting.protect_model_ratio': boolean

@@ -94,7 +94,8 @@ func GetOptions(c *gin.Context) {
 			strings.HasSuffix(k, "Secret") ||
 			strings.HasSuffix(k, "Key") ||
 			strings.HasSuffix(k, "secret") ||
-			strings.HasSuffix(k, "api_key")
+			strings.HasSuffix(k, "api_key") ||
+			strings.HasSuffix(k, "_token")
 		if isSensitiveKey {
 			continue
 		}
@@ -123,6 +124,10 @@ func GetOptions(c *gin.Context) {
 	options = append(options, &model.Option{
 		Key:   "CompletionRatioMeta",
 		Value: buildCompletionRatioMetaValue(optionValues),
+	})
+	options = append(options, &model.Option{
+		Key:   "ratio_protect_setting.has_auth_token",
+		Value: strconv.FormatBool(ratio_setting.GetRatioProtectSetting().HasAuthToken()),
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

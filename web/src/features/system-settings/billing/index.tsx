@@ -113,6 +113,8 @@ const defaultBillingSettings: BillingSettings = {
   'ratio_protect_setting.channel_id': 0,
   'ratio_protect_setting.channel_ids': [],
   'ratio_protect_setting.endpoint': '',
+  'ratio_protect_setting.has_auth_token': false,
+  'ratio_protect_setting.sync_groups': [],
   'ratio_protect_setting.markup_mode': 'add',
   'ratio_protect_setting.markup_value': 0.1,
   'ratio_protect_setting.protect_model_ratio': true,
