@@ -27,6 +27,7 @@ import {
   LayoutDashboard,
   ListTodo,
   MessageSquare,
+  ShoppingBag,
   PlugZap,
   Radio,
   ServerCog,
@@ -115,6 +116,11 @@ export function useSidebarData(): SidebarData {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,
+          },
+          {
+            title: t('Top-up Center'),
+            url: '/topup',
+            icon: ShoppingBag,
           },
           {
             title: t('Profile'),
