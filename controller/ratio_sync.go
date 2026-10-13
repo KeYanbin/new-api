@@ -256,7 +256,7 @@ func newUpstreamRatioHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport := &http.Transport{MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: 1 * time.Second, ResponseHeaderTimeout: 10 * time.Second}
 	if common.TLSInsecureSkipVerify {
-		transport.TLSClientConfig = common.InsecureTLSConfig
+		transport.TLSClientConfig = common.InsecureTLSConfig.Clone()
 	}
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
@@ -406,7 +406,7 @@ func fetchUpstreamBody(parent context.Context, client *http.Client, chItem dto.U
 		return upstreamFetchResult{}, fmt.Errorf("%s", resp.Status)
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
-		logger.LogWarn(parent, "unexpected content-type from "+chItem.Name+": "+ct)
+		logger.LogWarn(parent, common.LogText("unexpected content-type from %s: %s", chItem.Name, ct))
 	}
 	limited := io.LimitReader(resp.Body, maxRatioConfigBytes)
 	bodyBytes, err := io.ReadAll(limited)
@@ -488,7 +488,7 @@ func parseUpstreamRatioBody(bodyBytes []byte) (map[string]any, error) {
 		BillingExpr          string   `json:"billing_expr"`
 	}
 	if err := common.Unmarshal(body.Data, &pricingItems); err != nil {
-		return nil, fmt.Errorf("无法解析上游返回数据")
+		return nil, fmt.Errorf("failed to parse the upstream response")
 	}
 	modelRatioMap := make(map[string]float64)
 	completionRatioMap := make(map[string]float64)
@@ -645,8 +645,8 @@ func mergeProtectUpstreamData(sources []map[string]any) map[string]any {
 func FetchUpstreamRatios(c *gin.Context) {
 	var req dto.UpstreamRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		common.SysError("failed to bind upstream request: " + err.Error())
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请求参数格式错误"})
+		common.SysError(common.LogText("failed to bind upstream request: %s", err.Error()))
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid request parameter format"))
 		return
 	}
 
@@ -656,13 +656,13 @@ func FetchUpstreamRatios(c *gin.Context) {
 
 	upstreams, err := resolveUpstreamDTOs(c.Request.Context(), req)
 	if err != nil {
-		logger.LogError(c.Request.Context(), "failed to query channels: "+err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "查询渠道失败"})
+		logger.LogError(c.Request.Context(), common.LogText("failed to query channels: %s", err.Error()))
+		common.ApiErrorStatus(c, http.StatusInternalServerError, common.NewMessage("Failed to query channels"))
 		return
 	}
 
 	if len(upstreams) == 0 {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "无有效上游渠道"})
+		common.ApiErrorT(c, "No valid upstream channel")
 		return
 	}
 
