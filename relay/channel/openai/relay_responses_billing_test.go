@@ -2,21 +2,188 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type responsesFailedWriter struct {
+	gin.ResponseWriter
+	failed chan struct{}
+	once   sync.Once
+	writes int
+}
+
+func (w *responsesFailedWriter) WriteString(string) (int, error) {
+	w.writes++
+	w.once.Do(func() { close(w.failed) })
+	return 0, io.ErrClosedPipe
+}
+
+func TestResponsesDisconnectRecoversFinalUsage(t *testing.T) {
+	oldTimeout, oldDrain := constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout
+	constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout = 30, 60
+	t.Cleanup(func() { constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout = oldTimeout, oldDrain })
+	for _, tc := range []struct {
+		name         string
+		first        string
+		terminal     string
+		beforeFirst  bool
+		writeFailure bool
+	}{
+		{name: "before first event", beforeFirst: true, terminal: "response.completed"},
+		{name: "tool arguments before final usage", first: `{"type":"response.function_call_arguments.delta","delta":"args"}`, terminal: "response.completed"},
+		{name: "text before final usage", first: `{"type":"response.output_text.delta","delta":"hello"}`, terminal: "response.completed"},
+		{name: "failed client write without cancelled context", first: `{"type":"response.created"}`, writeFailure: true, terminal: "response.completed"},
+		{name: "incomplete response with billed usage", first: `{"type":"response.created"}`, terminal: "response.incomplete"},
+		{name: "failed response with billed usage", first: `{"type":"response.created"}`, terminal: "response.failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+			c.Set(common.RequestIdKey, "responses-disconnect-regression")
+			info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"}}
+			var failedWriter *responsesFailedWriter
+			if tc.writeFailure {
+				failedWriter = &responsesFailedWriter{ResponseWriter: c.Writer, failed: make(chan struct{})}
+				c.Writer = failedWriter
+			} else if tc.beforeFirst {
+				cancel()
+			} else {
+				c.Writer = &cancelAfterWriter{ResponseWriter: c.Writer, needle: "data:", cancel: cancel}
+			}
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				usage, apiErr = OaiResponsesStreamHandler(c, info, &http.Response{Body: pr})
+			}()
+			if tc.first != "" {
+				_, err := io.WriteString(pw, "data: "+tc.first+"\n\n")
+				require.NoError(t, err)
+			}
+			disconnected := ctx.Done()
+			if failedWriter != nil {
+				disconnected = failedWriter.failed
+			}
+			select {
+			case <-disconnected:
+			case <-time.After(5 * time.Second):
+				t.Fatal("client did not disconnect")
+			}
+			terminal := `{"type":"` + tc.terminal + `","response":{"usage":{"input_tokens":1100,"output_tokens":70,"total_tokens":1170,"input_tokens_details":{"cached_tokens":1000},"output_tokens_details":{"reasoning_tokens":60}}}}`
+			_, err := io.WriteString(pw, "data: "+terminal+"\n\n")
+			require.NoError(t, err)
+			// Keep the upstream open: final usage must finish accounting without waiting for EOF.
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("final usage did not finish the stream")
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 1100, usage.PromptTokens)
+			assert.Equal(t, 70, usage.CompletionTokens)
+			assert.Equal(t, 1170, usage.TotalTokens)
+			assert.Equal(t, 1000, usage.PromptTokensDetails.CachedTokens)
+			assert.Equal(t, 60, usage.CompletionTokenDetails.ReasoningTokens)
+			assert.True(t, info.StreamStatus.ClientDisconnected)
+			assert.Equal(t, "recovered", info.StreamStatus.UsageRecovery)
+			assert.NotContains(t, w.Body.String(), tc.terminal)
+			if tc.beforeFirst {
+				assert.Empty(t, w.Body.String())
+			}
+			if failedWriter != nil {
+				assert.Equal(t, 1, failedWriter.writes)
+			}
+			_, err = io.WriteString(pw, "data: "+terminal+"\n\n")
+			assert.ErrorIs(t, err, io.ErrClosedPipe, "terminal usage closes the stream before any duplicate terminal can be counted")
+			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 1000, 0.1, 0, 1).Snapshot()
+			require.Contains(t, other, "admin_info")
+			assert.Equal(t, "recovered", other["admin_info"].(map[string]any)["stream_usage_recovery"])
+		})
+	}
+}
+
+func TestResponsesDisconnectWithoutFinalUsageRequiresReconciliation(t *testing.T) {
+	oldTimeout, oldDrain := constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout
+	t.Cleanup(func() { constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout = oldTimeout, oldDrain })
+	for _, tc := range []struct {
+		name    string
+		drain   int
+		endBody bool
+	}{
+		{name: "upstream EOF without usage", drain: 60, endBody: true},
+		{name: "hard drain deadline closes upstream", drain: 1},
+		{name: "draining disabled closes upstream immediately", drain: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			constant.StreamingTimeout, constant.ResponsesUsageDrainTimeout = 30, tc.drain
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			if tc.endBody {
+				require.NoError(t, pw.Close())
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+			info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"}}
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				usage, apiErr = OaiResponsesStreamHandler(c, info, &http.Response{Body: pr})
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("upstream did not close within the drain deadline")
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Zero(t, usage.TotalTokens, "missing usage must not be invented")
+			assert.Equal(t, "pending_reconciliation", info.StreamStatus.UsageRecovery)
+			assert.Empty(t, w.Body.String())
+			if !tc.endBody {
+				_, err := io.WriteString(pw, "data: late\n\n")
+				assert.ErrorIs(t, err, io.ErrClosedPipe)
+			}
+			if tc.drain == 1 {
+				assert.True(t, info.StreamStatus.HasErrors())
+			}
+			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 0.1, 0, 1).Snapshot()
+			require.Contains(t, other, "admin_info")
+			assert.Equal(t, "pending_reconciliation", other["admin_info"].(map[string]any)["stream_usage_recovery"])
+		})
+	}
+}
 
 func TestOaiResponsesHandlerCountsOutputCallsNotDeclarations(t *testing.T) {
 	gin.SetMode(gin.TestMode)

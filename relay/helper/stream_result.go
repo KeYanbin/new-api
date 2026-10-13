@@ -8,8 +8,10 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status  *relaycommon.StreamStatus
-	stopped bool
+	status     *relaycommon.StreamStatus
+	stopped    bool
+	clientGone <-chan struct{}
+	disconnect func(error)
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -44,6 +46,23 @@ func (r *StreamResult) Done() {
 // IsStopped returns whether Stop() or Done() was called during this chunk.
 func (r *StreamResult) IsStopped() bool {
 	return r.stopped
+}
+
+// ClientDisconnected reports whether downstream delivery has stopped.
+func (r *StreamResult) ClientDisconnected() bool {
+	select {
+	case <-r.clientGone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Disconnect stops downstream delivery while allowing bounded usage collection.
+func (r *StreamResult) Disconnect(err error) {
+	if r.disconnect != nil {
+		r.disconnect(err)
+	}
 }
 
 // reset clears the per-chunk stopped flag so the object can be reused.

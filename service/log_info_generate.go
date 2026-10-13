@@ -141,12 +141,15 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 	}
 	ss := relayInfo.StreamStatus
 	status := "ok"
-	if !ss.IsNormalEnd() || ss.HasErrors() {
+	if !ss.IsNormalEnd() || ss.HasErrors() || ss.ClientDisconnected {
 		status = "error"
 	}
 	streamInfo := map[string]any{
 		"status":     status,
 		"end_reason": string(ss.EndReason),
+	}
+	if ss.ClientDisconnected {
+		streamInfo["client_disconnected"] = true
 	}
 	if ss.EndError != nil {
 		streamInfo["end_error"] = ss.EndError.Error()
@@ -160,6 +163,9 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 		streamInfo["errors"] = messages
 	}
 	other.SetPublic("stream_status", streamInfo)
+	if ss.UsageRecovery != "" {
+		other.SetAdmin("stream_usage_recovery", ss.UsageRecovery)
+	}
 }
 
 func appendBillingInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {

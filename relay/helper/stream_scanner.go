@@ -80,7 +80,12 @@ func ExtendWriteDeadline(c *gin.Context) {
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 }
 
-func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
+type StreamScannerOptions struct {
+	// ClientDisconnectTimeout（客户端断开后读取用量的最长等待时间）为零时立即关闭上游。
+	ClientDisconnectTimeout time.Duration
+}
+
+func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult), options ...StreamScannerOptions) {
 
 	if resp == nil || dataHandler == nil {
 		return
@@ -92,17 +97,32 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	ctx, cancel := context.WithCancel(context.Background())
 
 	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
+	var disconnectTimeout time.Duration
+	if len(options) > 0 {
+		disconnectTimeout = max(0, options[0].ClientDisconnectTimeout)
+	}
 
 	var (
-		stopChan    = make(chan bool, 3) // 增加缓冲区避免阻塞
-		scanner     = NewStreamScanner(resp.Body)
-		ticker      = time.NewTicker(streamingTimeout)
-		pingTicker  *time.Ticker
-		writeMutex  sync.Mutex     // Mutex to protect concurrent writes
-		wg          sync.WaitGroup // 用于等待所有 goroutine 退出
-		cleanupOnce sync.Once
-		stopOnce    sync.Once
+		stopChan       = make(chan bool, 3) // 增加缓冲区避免阻塞
+		scanner        = NewStreamScanner(resp.Body)
+		ticker         = time.NewTicker(streamingTimeout)
+		pingTicker     *time.Ticker
+		writeMutex     sync.Mutex     // Mutex to protect concurrent writes
+		wg             sync.WaitGroup // 用于等待所有 goroutine 退出
+		cleanupOnce    sync.Once
+		stopOnce       sync.Once
+		clientGone     = make(chan struct{})
+		disconnectOnce sync.Once
 	)
+	disconnect := func(err error) {
+		disconnectOnce.Do(func() {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+			close(clientGone)
+		})
+	}
+	if err := c.Request.Context().Err(); err != nil {
+		disconnect(err)
+	}
 
 	stop := func() {
 		stopOnce.Do(func() {
@@ -183,7 +203,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					}()
 					if err != nil {
 						logger.LogError(c, "ping data error: "+err.Error())
-						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
+						if disconnectTimeout > 0 {
+							disconnect(err)
+						} else {
+							info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
+						}
 						return
 					}
 					logger.LogDebug(c, "ping data sent")
@@ -193,6 +217,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					return
 				case <-c.Request.Context().Done():
 					// 监听客户端断开连接
+					return
+				case <-clientGone:
 					return
 				case <-pingTimeout.C:
 					logger.LogError(c, "ping goroutine max duration reached")
@@ -215,8 +241,13 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			wg.Done()
 		}()
 		sr := newStreamResult(info.StreamStatus)
+		sr.clientGone = clientGone
+		sr.disconnect = disconnect
 		for data := range dataChan {
 			sr.reset()
+			if err := c.Request.Context().Err(); err != nil {
+				disconnect(err)
+			}
 			func() {
 				writeMutex.Lock()
 				defer writeMutex.Unlock()
@@ -295,19 +326,42 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
 	})
 
-	// 主循环等待完成或超时
-	select {
-	case <-ticker.C:
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
-	case <-stopChan:
-		// EndReason already set by the goroutine that triggered stopChan
-	case <-c.Request.Context().Done():
-		// 客户端断开：立即 cleanup 关闭上游 resp.Body，解除 scanner 阻塞并让上游停止生成，
-		// 避免为已放弃的请求继续消费上游 token。
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+	// The drain deadline is independent of upstream activity and cannot be extended by new chunks.
+	clientDone := c.Request.Context().Done()
+	disconnectSignal := (<-chan struct{})(clientGone)
+	var drainDeadline <-chan time.Time
+waitStream:
+	for {
+		select {
+		case <-ticker.C:
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
+			break waitStream
+		case <-stopChan:
+			break waitStream
+		case <-clientDone:
+			disconnect(c.Request.Context().Err())
+			clientDone = nil
+		case <-disconnectSignal:
+			if disconnectTimeout == 0 {
+				break waitStream
+			}
+			disconnectSignal = nil
+			clientDone = nil
+			timer := time.NewTimer(disconnectTimeout)
+			defer timer.Stop()
+			drainDeadline = timer.C
+		case <-drainDeadline:
+			info.StreamStatus.RecordError("upstream usage collection timed out after client disconnect")
+			break waitStream
+		}
 	}
 
 	cleanup()
+	select {
+	case <-clientGone:
+		info.StreamStatus.ClientDisconnected = true
+	default:
+	}
 	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
 		logger.LogInfo(c, fmt.Sprintf("stream ended: %s", info.StreamStatus.Summary()))
 	} else {

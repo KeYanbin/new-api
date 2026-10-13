@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -77,6 +78,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	defer service.CloseResponseBodyGracefully(resp)
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
+	var finalUsageReceived bool
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -90,9 +92,26 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		if streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		sendResponsesStreamData(c, streamResponse, data)
 		accumulator.Observe(&streamResponse)
-	})
+		switch streamResponse.Type {
+		case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+			finalUsageReceived = streamResponse.Response != nil && streamResponse.Response.Usage != nil
+			sr.Done()
+		}
+		if !sr.ClientDisconnected() {
+			if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+				sr.Disconnect(err)
+			}
+		}
+	}, helper.StreamScannerOptions{ClientDisconnectTimeout: time.Duration(constant.ResponsesUsageDrainTimeout) * time.Second})
+
+	if info.StreamStatus.ClientDisconnected {
+		info.StreamStatus.UsageRecovery = "recovered"
+		if !finalUsageReceived {
+			info.StreamStatus.UsageRecovery = "pending_reconciliation"
+			logger.LogWarn(c, "Responses stream disconnected without final upstream usage; billing requires reconciliation")
+		}
+	}
 
 	return accumulator.Finish(), nil
 }

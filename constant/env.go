@@ -1,6 +1,7 @@
 package constant
 
 var StreamingTimeout int
+var ResponsesUsageDrainTimeout = 60
 var DifyDebug bool
 var MaxFileDownloadMB int
 var StreamScannerMaxBufferMB int

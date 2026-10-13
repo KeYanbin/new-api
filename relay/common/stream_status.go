@@ -32,6 +32,9 @@ type StreamStatus struct {
 	EndReason StreamEndReason
 	EndError  error
 	endOnce   sync.Once
+	// Written after all stream workers have exited, before settlement.
+	ClientDisconnected bool
+	UsageRecovery      string
 
 	mu         sync.Mutex
 	Errors     []StreamErrorEntry
