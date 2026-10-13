@@ -401,6 +401,18 @@ func fetchUpstreamBody(parent context.Context, client *http.Client, chItem dto.U
 	if lastErr != nil {
 		return upstreamFetchResult{}, lastErr
 	}
+	// A stale panel token can make a public Sub2API plaza reject the request.
+	// Keep authenticated prices when available; retry anonymously only on 401.
+	if isSub2API && resp.StatusCode == http.StatusUnauthorized && httpReq.Header.Get("Authorization") != "" {
+		resp.Body.Close()
+		logger.LogWarn(parent, common.LogText("Sub2API price request for channel %d returned 401; retrying public prices without credentials", chItem.ID))
+		publicReq := httpReq.Clone(ctx)
+		publicReq.Header.Del("Authorization")
+		resp, err = client.Do(publicReq)
+		if err != nil {
+			return upstreamFetchResult{}, err
+		}
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return upstreamFetchResult{}, fmt.Errorf("%s", resp.Status)

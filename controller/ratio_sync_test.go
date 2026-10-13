@@ -325,6 +325,60 @@ func TestFetchOneUpstreamRatioWithAuthPrefersDedicatedToken(t *testing.T) {
 	assert.Equal(t, "Bearer dashboard-jwt", <-received)
 }
 
+func TestSub2APIPriceFetchAuthentication(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		source       string
+		token        string
+		authStatus   int
+		publicStatus int
+		wantHeaders  []string
+		wantError    string
+	}{
+		{name: "expired token falls back to public prices", source: ratio_setting.RatioProtectSourceSub2API, token: "expired-token", authStatus: 401, publicStatus: 200, wantHeaders: []string{"Bearer expired-token", ""}},
+		{name: "valid token preserves account prices", source: ratio_setting.RatioProtectSourceSub2API, token: "valid-token", authStatus: 200, publicStatus: 200, wantHeaders: []string{"Bearer valid-token"}},
+		{name: "public prices need no token", source: ratio_setting.RatioProtectSourceSub2API, publicStatus: 200, wantHeaders: []string{""}},
+		{name: "private prices still require authentication", source: ratio_setting.RatioProtectSourceSub2API, token: "expired-token", authStatus: 401, publicStatus: 401, wantHeaders: []string{"Bearer expired-token", ""}, wantError: "401 Unauthorized"},
+		{name: "anonymous rejection is not retried", source: ratio_setting.RatioProtectSourceSub2API, publicStatus: 401, wantHeaders: []string{""}, wantError: "401 Unauthorized"},
+		{name: "forbidden is not retried", source: ratio_setting.RatioProtectSourceSub2API, token: "valid-token", authStatus: 403, publicStatus: 200, wantHeaders: []string{"Bearer valid-token"}, wantError: "403 Forbidden"},
+		{name: "other sources retain authentication errors", source: ratio_setting.RatioProtectSourceNewAPI, token: "expired-token", authStatus: 401, publicStatus: 200, wantHeaders: []string{"Bearer expired-token"}, wantError: "401 Unauthorized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := sub2APIPlazaBody(t)
+			headers := make(chan string, 4)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				auth := r.Header.Get("Authorization")
+				headers <- auth
+				status := tc.publicStatus
+				if auth != "" {
+					status = tc.authStatus
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = w.Write(body)
+				}
+			}))
+			t.Cleanup(server.Close)
+			result, err := fetchUpstreamBody(context.Background(), server.Client(), dto.UpstreamDTO{
+				ID: 1, BaseURL: server.URL, Endpoint: "/custom/prices",
+			}, 5, upstreamFetchOptions{Source: tc.source, AuthToken: tc.token, SkipChannelKey: true})
+			if tc.wantError != "" {
+				require.EqualError(t, err, tc.wantError)
+				assert.Empty(t, result.Body)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, body, result.Body)
+			}
+			var received []string
+			for len(headers) > 0 {
+				received = append(received, <-headers)
+			}
+			assert.Equal(t, tc.wantHeaders, received)
+		})
+	}
+}
+
 func sub2APIPlazaBody(t *testing.T) []byte {
 	t.Helper()
 	body := map[string]any{
