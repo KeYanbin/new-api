@@ -29,6 +29,7 @@ import { toast } from 'sonner'
 type SettingsFormOptions<T extends FieldValues> = UseFormProps<T> & {
   onSubmit: (data: T, changedFields: Record<string, unknown>) => Promise<void>
   compareValues?: (a: unknown, b: unknown) => boolean
+  submitUnchanged?: boolean
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -185,6 +186,7 @@ function expandDotPaths<T extends FieldValues>(
 export function useSettingsForm<T extends FieldValues>({
   onSubmit,
   compareValues,
+  submitUnchanged = false,
   defaultValues,
   ...formOptions
 }: SettingsFormOptions<T>) {
@@ -248,7 +250,7 @@ export function useSettingsForm<T extends FieldValues>({
       ([key, value]) => !compare(value, baselineRef.current[key])
     )
 
-    if (changedEntries.length === 0) {
+    if (changedEntries.length === 0 && !submitUnchanged) {
       toast.info(i18next.t('No changes to save'))
       return
     }

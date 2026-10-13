@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -15,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -320,4 +323,296 @@ func TestFetchOneUpstreamRatioWithAuthPrefersDedicatedToken(t *testing.T) {
 	}, 5, "dashboard-jwt")
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer dashboard-jwt", <-received)
+}
+
+func sub2APIPlazaBody(t *testing.T) []byte {
+	t.Helper()
+	body := map[string]any{
+		"code":    0,
+		"message": "success",
+		"data": map[string]any{
+			"groups": []any{
+				map[string]any{
+					"id": 9, "name": "GPT 稳定分组", "platform": "openai", "rate_multiplier": 0.07,
+					"models": []any{
+						map[string]any{
+							"name": "gpt-5.5",
+							"pricing": map[string]any{
+								"billing_mode": "token", "input_price": 0.000005, "output_price": 0.000015,
+								"cache_write_price": 0.00000625, "cache_read_price": 5e-7,
+							},
+						},
+						map[string]any{
+							"name": "codex-tiered",
+							"pricing": map[string]any{
+								"billing_mode": "token", "input_price": 0.000002, "output_price": 0.000009,
+								"intervals": []any{
+									map[string]any{"min_tokens": 0, "max_tokens": 272000, "input_price": 0.000002, "output_price": 0.000009},
+									map[string]any{"min_tokens": 272000, "max_tokens": nil, "input_price": 0.000004, "output_price": 0.000018},
+								},
+							},
+						},
+						map[string]any{"name": "free-model", "pricing": map[string]any{"billing_mode": "token", "input_price": 0}},
+						map[string]any{"name": "no-price"},
+					},
+				},
+				map[string]any{
+					"id": 49, "name": "CCMAX 勿蒸馏", "platform": "anthropic", "rate_multiplier": 0.8,
+					"models": []any{
+						map[string]any{"name": "gpt-5.5", "pricing": map[string]any{"billing_mode": "token", "input_price": 0.000005, "output_price": 0.000015}},
+					},
+				},
+			},
+		},
+	}
+	encoded, err := common.Marshal(body)
+	require.NoError(t, err)
+	return encoded
+}
+
+func TestConvertSub2APIPlazaToRatioDataAppliesGroupRate(t *testing.T) {
+	data, notes, err := convertSub2APIPlazaToRatioData(bytes.NewReader(sub2APIPlazaBody(t)), "GPT 稳定分组")
+	require.NoError(t, err)
+	modelRatio := data["model_ratio"].(map[string]any)
+	// 5e-6 USD/token * 0.07 = 3.5e-7 USD/token -> 0.35 USD per 1M -> ratio 0.175
+	assert.Equal(t, 0.175, modelRatio["gpt-5.5"])
+	assert.Equal(t, 0.0, modelRatio["free-model"])
+	assert.NotContains(t, modelRatio, "no-price")
+	assert.Equal(t, 3.0, data["completion_ratio"].(map[string]any)["gpt-5.5"])
+	assert.Equal(t, 0.1, data["cache_ratio"].(map[string]any)["gpt-5.5"])
+	assert.Equal(t, 1.25, data["create_cache_ratio"].(map[string]any)["gpt-5.5"])
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "阶梯计价")
+	assert.Contains(t, notes[0], "codex-tiered")
+}
+
+func TestConvertSub2APIPlazaToRatioDataSelectsGroupByID(t *testing.T) {
+	data, _, err := convertSub2APIPlazaToRatioData(bytes.NewReader(sub2APIPlazaBody(t)), "49")
+	require.NoError(t, err)
+	// group 49 charges 0.8x: 5e-6 * 0.8 = 4e-6 USD/token -> 4 USD per 1M -> ratio 2
+	assert.Equal(t, 2.0, data["model_ratio"].(map[string]any)["gpt-5.5"])
+}
+
+func TestConvertSub2APIPlazaToRatioDataRejectsUnknownGroup(t *testing.T) {
+	_, _, err := convertSub2APIPlazaToRatioData(bytes.NewReader(sub2APIPlazaBody(t)), "missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GPT 稳定分组")
+}
+
+func TestConvertSub2APIPlazaToRatioDataKeepsPerRequestPrice(t *testing.T) {
+	body := []byte(`{"code":0,"message":"success","data":{"groups":[{"id":19,"name":"生图","rate_multiplier":0.2,"image_rate_independent":true,"image_rate_multiplier":0.5,"models":[{"name":"gpt-image","pricing":{"billing_mode":"image","per_request_price":0.4}}]}]}}`)
+	data, _, err := convertSub2APIPlazaToRatioData(bytes.NewReader(body), "生图")
+	require.NoError(t, err)
+	assert.Equal(t, 0.2, data["model_price"].(map[string]any)["gpt-image"])
+}
+
+func TestParseSub2APIPlazaGroupsRejectsErrorPayload(t *testing.T) {
+	_, err := parseSub2APIPlazaGroups([]byte(`{"code":401,"message":"UNAUTHORIZED"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNAUTHORIZED")
+}
+
+func sub2APIPlazaServer(t *testing.T, groupID int64, name string, rate float64, models map[string][2]float64) *httptest.Server {
+	t.Helper()
+	plazaModels := make([]map[string]any, 0, len(models))
+	for modelName, price := range models {
+		plazaModels = append(plazaModels, map[string]any{
+			"name": modelName,
+			"pricing": map[string]any{
+				"billing_mode": "token",
+				"input_price":  price[0],
+				"output_price": price[1],
+			},
+		})
+	}
+	body := map[string]any{
+		"code":    0,
+		"message": "success",
+		"data": map[string]any{
+			"groups": []any{map[string]any{
+				"id": groupID, "name": name, "platform": "openai", "rate_multiplier": rate, "models": plazaModels,
+			}},
+		},
+	}
+	encoded, err := common.Marshal(body)
+	require.NoError(t, err)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != ratio_setting.RatioProtectSub2APIDefaultEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(encoded)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// ratioProtectMemoryDB boots an isolated in-memory database so the protect task
+// can read channels, pricing options and the snapshot it writes back.
+func ratioProtectMemoryDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMaster, previousSQLite := common.IsMasterNode, common.SQLitePath
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousOptions := common.OptionMap
+	common.IsMasterNode = false
+	common.SQLitePath = ":memory:"
+	common.OptionMap = map[string]string{}
+	t.Setenv("SQL_DSN", "")
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	db := model.DB
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	model.LOG_DB = db
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Option{}, &model.Model{}, &model.Ability{}))
+	t.Cleanup(func() {
+		common.OptionMap = previousOptions
+		common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite
+		common.SetDatabaseTypes(previousMain, previousLog)
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+	})
+	return db
+}
+
+func TestRunRatioProtectTaskFollowsEachChannelUpstreamPrice(t *testing.T) {
+	db := ratioProtectMemoryDB(t)
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	restoreRatios := []struct {
+		value   string
+		restore func(string) error
+	}{
+		{ratio_setting.ModelRatio2JSONString(), ratio_setting.UpdateModelRatioByJSONString},
+		{ratio_setting.CompletionRatio2JSONString(), ratio_setting.UpdateCompletionRatioByJSONString},
+	}
+	t.Cleanup(func() {
+		for _, value := range restoreRatios {
+			require.NoError(t, value.restore(value.value))
+		}
+		restore := map[string]string{}
+		for key, value := range previousConfig {
+			if after, ok := strings.CutPrefix(key, "ratio_protect_setting."); ok {
+				restore[after] = value
+			}
+		}
+		require.NoError(t, config.UpdateConfigFromMap(config.GlobalConfig.Get("ratio_protect_setting"), restore))
+	})
+
+	// Two upstreams with different group rates, one shared model.
+	const (
+		sharedModel = "gpt-5.5"
+		onlyAModel  = "claude-haiku"
+		onlyBModel  = "gemini-2.5"
+	)
+	serverA := sub2APIPlazaServer(t, 9, "GPT 稳定分组", 0.07, map[string][2]float64{
+		sharedModel: {0.000005, 0.000015},
+		onlyAModel:  {0.000001, 0.000005},
+	})
+	serverB := sub2APIPlazaServer(t, 49, "CCMAX 勿蒸馏", 0.8, map[string][2]float64{
+		sharedModel: {0.000005, 0.000015},
+		onlyBModel:  {0.000002, 0.000010},
+	})
+	channelA := &model.Channel{Name: "kedaya-A", Type: 1, Key: "sk-a", Status: common.ChannelStatusEnabled, BaseURL: lo.ToPtr(serverA.URL), Models: sharedModel, Group: "default"}
+	channelB := &model.Channel{Name: "kedaya-B", Type: 1, Key: "sk-b", Status: common.ChannelStatusEnabled, BaseURL: lo.ToPtr(serverB.URL), Models: sharedModel, Group: "default"}
+	require.NoError(t, db.Create(channelA).Error)
+	require.NoError(t, db.Create(channelB).Error)
+
+	// Local prices start at the upstream raw price, which the first run marks up.
+	for name, ratio := range map[string]float64{sharedModel: 0.175, onlyAModel: 0.035, onlyBModel: 0.8} {
+		snapshot, err := model.GetModelPricingSnapshot([]string{name})
+		require.NoError(t, err)
+		require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{{
+			ModelName:       name,
+			ExpectedVersion: snapshot.Entries[0].Version,
+			Pricing:         model.PricingValues{"ModelRatio": ratio},
+		}}))
+	}
+
+	sources, err := common.Marshal([]ratio_setting.RatioProtectChannelSource{
+		{ChannelID: channelA.Id, Source: ratio_setting.RatioProtectSourceSub2API, UpstreamGroup: "GPT 稳定分组", MarkupMode: ratio_setting.RatioProtectModeAdd, MarkupValue: 0.1},
+		{ChannelID: channelB.Id, Source: ratio_setting.RatioProtectSourceSub2API, UpstreamGroup: "CCMAX 勿蒸馏", MarkupMode: ratio_setting.RatioProtectModeAdd, MarkupValue: 0.1},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.UpdateConfigFromMap(config.GlobalConfig.Get("ratio_protect_setting"), map[string]string{
+		"enabled":           "true",
+		"auto_apply":        "true",
+		"notify":            "false",
+		"markup_mode":       ratio_setting.RatioProtectModeAdd,
+		"markup_value":      "0.1",
+		"max_change_factor": "5",
+		"sources":           string(sources),
+		"source_states":     "{}",
+	}))
+
+	summary, err := runRatioProtectTaskOnce(context.Background(), false, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{sharedModel, onlyAModel, onlyBModel}, summary.AppliedModels)
+	require.Len(t, summary.Conflicts, 1)
+	assert.Contains(t, summary.Conflicts[0], sharedModel)
+	assert.Contains(t, summary.Conflicts[0], "kedaya-A")
+	assert.Contains(t, summary.Conflicts[0], "kedaya-B")
+
+	ratios := ratio_setting.GetModelRatioCopy()
+	assert.InDelta(t, 0.275, ratios[sharedModel], 1e-9)
+	assert.InDelta(t, 0.135, ratios[onlyAModel], 1e-9)
+	assert.InDelta(t, 0.9, ratios[onlyBModel], 1e-9)
+
+	var states map[string]ratio_setting.RatioProtectSourceState
+	require.NoError(t, common.UnmarshalJsonStr(common.OptionMap["ratio_protect_setting.source_states"], &states))
+	assert.Len(t, states, 2)
+	for _, binding := range ratio_setting.GetRatioProtectSetting().EffectiveBindings() {
+		state := states[binding.Fingerprint()]
+		if binding.ChannelIDs[0] == channelA.Id {
+			assert.Equal(t, map[string]float64{"model_ratio": 0.175}, state.LastSeen[sharedModel])
+			assert.Equal(t, map[string]float64{"model_ratio": 0.035}, state.LastSeen[onlyAModel])
+		} else {
+			assert.Equal(t, map[string]float64{"model_ratio": 0.8}, state.LastSeen[onlyBModel])
+		}
+	}
+}
+
+func TestSub2APICustomEndpointUsesExplicitSource(t *testing.T) {
+	body := sub2APIPlazaBody(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/custom/prices", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	upstream := dto.UpstreamDTO{BaseURL: server.URL, Endpoint: "/custom/prices"}
+	groups, err := fetchUpstreamPriceGroups(context.Background(), upstream, "/custom/prices", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, groups)
+	data, err := fetchUpstreamPriceData(context.Background(), server.Client(), upstream, 5, upstreamFetchOptions{
+		Source:         ratio_setting.RatioProtectSourceSub2API,
+		UpstreamGroup:  "49",
+		SkipChannelKey: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2.0, data.Data["model_ratio"].(map[string]any)["gpt-5.5"])
+}
+
+func TestRatioProtectExplicitEmptySourcesSurviveReload(t *testing.T) {
+	for _, raw := range []string{"[]", "null"} {
+		t.Run(raw, func(t *testing.T) {
+			setting := ratio_setting.RatioProtectSetting{}
+			require.NoError(t, config.UpdateConfigFromMap(&setting, map[string]string{
+				"channel_id": "7", "channel_ids": "[7,9]", "sources": raw,
+			}))
+			for range 2 {
+				encoded, err := common.Marshal(setting)
+				require.NoError(t, err)
+				require.NoError(t, common.Unmarshal(encoded, &setting))
+				if raw == "[]" {
+					assert.Empty(t, setting.EffectiveBindings())
+					assert.Empty(t, setting.SelectedChannelIDs())
+				} else {
+					require.Len(t, setting.EffectiveBindings(), 1)
+					assert.Equal(t, []int{7, 9}, setting.SelectedChannelIDs())
+				}
+			}
+		})
+	}
 }

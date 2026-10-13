@@ -30,6 +30,7 @@ import type {
   UpdatePasskeyDomainsRequest,
   UpdatePasskeyDomainsResponse,
   UpstreamChannelsResponse,
+  UpstreamPriceGroupsResponse,
   UpstreamRatiosResponse,
 } from './types'
 
@@ -114,6 +115,22 @@ export async function getUpstreamChannels() {
   return res.data
 }
 
+export async function getUpstreamPriceGroups(params: {
+  channelId: number
+  endpoint?: string
+}) {
+  const res = await api.get<UpstreamPriceGroupsResponse>(
+    '/api/ratio_sync/upstream_groups',
+    {
+      params: {
+        channel_id: params.channelId,
+        endpoint: params.endpoint || undefined,
+      },
+    }
+  )
+  return res.data
+}
+
 export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
   const res = await api.post<UpstreamRatiosResponse>(
     '/api/ratio_sync/fetch',
@@ -123,9 +140,13 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
 }
 
 export async function triggerRatioProtectTask() {
-  const res = await api.post<SystemTaskResponse>('/api/ratio_sync/protect', null, {
-    validateStatus: (status) =>
-      (status >= 200 && status < 300) || status === 409,
-  })
+  const res = await api.post<SystemTaskResponse>(
+    '/api/ratio_sync/protect',
+    null,
+    {
+      validateStatus: (status) =>
+        (status >= 200 && status < 300) || status === 409,
+    }
+  )
   return res.data
 }

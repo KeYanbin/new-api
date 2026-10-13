@@ -37,3 +37,15 @@ type SyncableChannel struct {
 	Status  int    `json:"status"`
 	Type    int    `json:"type"`
 }
+
+// UpstreamPriceGroup is one selectable upstream price (a Sub2API group) that a
+// channel can be bound to.
+type UpstreamPriceGroup struct {
+	ID                 int64   `json:"id"`
+	Name               string  `json:"name"`
+	Platform           string  `json:"platform,omitempty"`
+	RateMultiplier     float64 `json:"rate_multiplier"`
+	PeakRateEnabled    bool    `json:"peak_rate_enabled,omitempty"`
+	PeakRateMultiplier float64 `json:"peak_rate_multiplier,omitempty"`
+	ModelCount         int     `json:"model_count"`
+}

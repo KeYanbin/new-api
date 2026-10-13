@@ -374,6 +374,7 @@ export type BillingSettings = {
   'ratio_protect_setting.endpoint': string
   'ratio_protect_setting.has_auth_token': boolean
   'ratio_protect_setting.sync_groups': string[]
+  'ratio_protect_setting.sources': string
   'ratio_protect_setting.markup_mode': 'add' | 'multiply'
   'ratio_protect_setting.markup_value': number
   'ratio_protect_setting.protect_model_ratio': boolean
@@ -477,6 +478,35 @@ export type UpstreamChannelsResponse = {
   success: boolean
   message: string
   data: UpstreamChannel[]
+}
+
+// One local channel bound to exactly one upstream price. Sub2API gateways such
+// as kedaya.ai expose one price per group, so `upstream_group` selects it.
+export type RatioProtectChannelSource = {
+  channel_id: number
+  source: 'newapi' | 'sub2api'
+  endpoint: string
+  upstream_group: string
+  sync_groups: string[]
+  markup_mode: 'add' | 'multiply'
+  markup_value: number
+}
+
+// One selectable upstream price of a channel's upstream endpoint.
+export type UpstreamPriceGroup = {
+  id: number
+  name: string
+  platform?: string
+  rate_multiplier: number
+  peak_rate_enabled?: boolean
+  peak_rate_multiplier?: number
+  model_count: number
+}
+
+export type UpstreamPriceGroupsResponse = {
+  success: boolean
+  message: string
+  data: UpstreamPriceGroup[]
 }
 
 export type UpstreamConfig = {

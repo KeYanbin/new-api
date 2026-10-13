@@ -28,6 +28,15 @@ const (
 )
 
 const (
+	RatioProtectSourceAuto    = ""
+	RatioProtectSourceNewAPI  = "newapi"
+	RatioProtectSourceSub2API = "sub2api"
+
+	RatioProtectDefaultEndpoint        = "/api/pricing"
+	RatioProtectSub2APIDefaultEndpoint = "/api/v1/model-plaza"
+)
+
+const (
 	RatioProtectActionApply            = "apply"
 	RatioProtectActionUnchanged        = "unchanged"
 	RatioProtectActionSkipCustom       = "skip_custom"
@@ -38,26 +47,84 @@ const (
 	RatioProtectActionSkipModeMismatch = "skip_mode_mismatch"
 )
 
+// RatioProtectChannelSource binds one local channel to exactly one upstream
+// price. Selecting the same channel twice is rejected because a channel cannot
+// follow two different upstream prices at the same time.
+type RatioProtectChannelSource struct {
+	ChannelID     int      `json:"channel_id"`
+	Source        string   `json:"source"`
+	Endpoint      string   `json:"endpoint"`
+	UpstreamGroup string   `json:"upstream_group"`
+	SyncGroups    []string `json:"sync_groups"`
+	MarkupMode    string   `json:"markup_mode"`
+	MarkupValue   float64  `json:"markup_value"`
+}
+
+// RatioProtectSourceState is the last-seen upstream snapshot of one binding.
+// Binding fingerprints the whole binding, so editing it restarts the snapshot.
+type RatioProtectSourceState struct {
+	Binding        string                        `json:"binding,omitempty"`
+	LastSeen       map[string]map[string]float64 `json:"last_seen,omitempty"`
+	LastSeenGroups map[string]float64            `json:"last_seen_group_ratio,omitempty"`
+}
+
+// RatioProtectMarkup is the pricing rule applied to one binding.
+type RatioProtectMarkup struct {
+	Mode  string
+	Value float64
+}
+
+// RatioProtectBinding is one upstream price the task polls: either a single
+// channel bound by the administrator, or the legacy multi-channel merge.
+type RatioProtectBinding struct {
+	Key           string
+	ChannelIDs    []int
+	Source        string
+	Endpoint      string
+	UpstreamGroup string
+	SyncGroups    []string
+	Markup        RatioProtectMarkup
+}
+
+type RatioProtectSourceDecisions struct {
+	Key       string
+	Name      string
+	Decisions []RatioProtectDecision
+}
+
+// RatioProtectConflict reports a model priced differently by two bindings. The
+// first binding wins; the reporter keeps the losing value visible.
+type RatioProtectConflict struct {
+	Model       string
+	Winner      string
+	Loser       string
+	WinnerValue map[string]float64
+	LoserValue  map[string]float64
+	Changed     []string
+}
+
 type RatioProtectSetting struct {
-	Enabled            bool                          `json:"enabled"`
-	AutoApply          bool                          `json:"auto_apply"`
-	IntervalMinutes    int                           `json:"interval_minutes"`
-	ChannelID          int                           `json:"channel_id"`
-	ChannelIDs         []int                         `json:"channel_ids"`
-	Endpoint           string                        `json:"endpoint"`
-	AuthToken          string                        `json:"auth_token"`
-	SyncGroups         []string                      `json:"sync_groups"`
-	MarkupMode         string                        `json:"markup_mode"`
-	MarkupValue        float64                       `json:"markup_value"`
-	ProtectModelRatio  bool                          `json:"protect_model_ratio"`
-	ProtectModelPrice  bool                          `json:"protect_model_price"`
-	ProtectGroupRatio  bool                          `json:"protect_group_ratio"`
-	SkipZeroUpstream   bool                          `json:"skip_zero_upstream"`
-	MaxChangeFactor    float64                       `json:"max_change_factor"`
-	Notify             bool                          `json:"notify"`
-	LastSeen           map[string]map[string]float64 `json:"last_seen"`
-	LastSeenSource     string                        `json:"last_seen_source"`
-	LastSeenGroupRatio map[string]float64            `json:"last_seen_group_ratio"`
+	Enabled            bool                               `json:"enabled"`
+	AutoApply          bool                               `json:"auto_apply"`
+	IntervalMinutes    int                                `json:"interval_minutes"`
+	ChannelID          int                                `json:"channel_id"`
+	ChannelIDs         []int                              `json:"channel_ids"`
+	Endpoint           string                             `json:"endpoint"`
+	AuthToken          string                             `json:"auth_token"`
+	SyncGroups         []string                           `json:"sync_groups"`
+	MarkupMode         string                             `json:"markup_mode"`
+	MarkupValue        float64                            `json:"markup_value"`
+	ProtectModelRatio  bool                               `json:"protect_model_ratio"`
+	ProtectModelPrice  bool                               `json:"protect_model_price"`
+	ProtectGroupRatio  bool                               `json:"protect_group_ratio"`
+	SkipZeroUpstream   bool                               `json:"skip_zero_upstream"`
+	MaxChangeFactor    float64                            `json:"max_change_factor"`
+	Notify             bool                               `json:"notify"`
+	LastSeen           map[string]map[string]float64      `json:"last_seen"`
+	LastSeenSource     string                             `json:"last_seen_source"`
+	LastSeenGroupRatio map[string]float64                 `json:"last_seen_group_ratio"`
+	Sources            []RatioProtectChannelSource        `json:"sources"`
+	SourceStates       map[string]RatioProtectSourceState `json:"source_states"`
 }
 
 var ratioProtectSetting = RatioProtectSetting{
@@ -74,6 +141,8 @@ var ratioProtectSetting = RatioProtectSetting{
 	Notify:             true,
 	LastSeen:           map[string]map[string]float64{},
 	LastSeenGroupRatio: map[string]float64{},
+	Sources:            nil,
+	SourceStates:       map[string]RatioProtectSourceState{},
 }
 
 func init() {
@@ -112,6 +181,13 @@ func (setting *RatioProtectSetting) SelectedChannelIDs() []int {
 	if setting == nil {
 		return nil
 	}
+	if setting.Sources != nil {
+		ids := make([]int, 0, len(setting.Sources))
+		for _, source := range setting.Sources {
+			ids = append(ids, source.ChannelID)
+		}
+		return ids
+	}
 	ids := uniqueChannelIDs(setting.ChannelIDs)
 	if len(ids) > 0 {
 		return ids
@@ -131,6 +207,112 @@ func (setting *RatioProtectSetting) SelectedSyncGroups() []string {
 
 func (setting *RatioProtectSetting) HasAuthToken() bool {
 	return setting != nil && strings.TrimSpace(setting.AuthToken) != ""
+}
+
+// Markup returns the default pricing rule, used by legacy settings and as the
+// fallback for a channel source that does not set its own markup.
+func (setting *RatioProtectSetting) Markup() RatioProtectMarkup {
+	if setting == nil {
+		return RatioProtectMarkup{Mode: RatioProtectModeAdd, Value: DefaultRatioProtectMarkupValue}
+	}
+	return RatioProtectMarkup{Mode: setting.MarkupMode, Value: setting.MarkupValue}
+}
+
+// HasChannelSources distinguishes an explicit binding list (including an empty
+// list) from an unmigrated configuration, which still uses the legacy channels.
+func (setting *RatioProtectSetting) HasChannelSources() bool {
+	return setting != nil && setting.Sources != nil
+}
+
+// EffectiveBindings lists every upstream price to poll. Each bound channel is
+// its own binding so one channel always follows exactly one upstream price;
+// legacy settings keep their previous merged multi-channel binding.
+func (setting *RatioProtectSetting) EffectiveBindings() []RatioProtectBinding {
+	if setting == nil {
+		return nil
+	}
+	if setting.Sources != nil {
+		bindings := make([]RatioProtectBinding, 0, len(setting.Sources))
+		for _, source := range setting.Sources {
+			bindings = append(bindings, RatioProtectBinding{
+				Key:           RatioProtectChannelSourceKey(source.ChannelID),
+				ChannelIDs:    []int{source.ChannelID},
+				Source:        source.Source,
+				Endpoint:      source.Endpoint,
+				UpstreamGroup: source.UpstreamGroup,
+				SyncGroups:    source.SyncGroups,
+				Markup:        RatioProtectMarkup{Mode: source.MarkupMode, Value: source.MarkupValue},
+			})
+		}
+		return bindings
+	}
+	ids := uniqueChannelIDs(setting.ChannelIDs)
+	if len(ids) == 0 && setting.ChannelID != 0 {
+		ids = []int{setting.ChannelID}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	groups := setting.SelectedSyncGroups()
+	endpoint := strings.TrimSpace(setting.Endpoint)
+	return []RatioProtectBinding{{
+		Key:        RatioProtectSourceKeysWithGroups(ids, endpoint, groups),
+		ChannelIDs: ids,
+		Source:     RatioProtectSourceAuto,
+		Endpoint:   endpoint,
+		SyncGroups: groups,
+		Markup:     setting.Markup(),
+	}}
+}
+
+func RatioProtectChannelSourceKey(channelID int) string {
+	return "ch:" + strconv.Itoa(channelID)
+}
+
+// Fingerprint identifies the binding configuration. Any edit changes it, which
+// restarts that binding's last-seen snapshot.
+func (binding RatioProtectBinding) Fingerprint() string {
+	if binding.Source == RatioProtectSourceAuto && binding.UpstreamGroup == "" {
+		return binding.Key
+	}
+	return strings.Join([]string{
+		binding.Key,
+		binding.Source,
+		strings.TrimSpace(binding.Endpoint),
+		strings.TrimSpace(binding.UpstreamGroup),
+		strings.Join(uniqueSyncGroups(binding.SyncGroups), ","),
+	}, "|")
+}
+
+// LoadBindingState returns the last-seen snapshot of one binding. A changed
+// binding fingerprint starts from an empty snapshot.
+func (setting *RatioProtectSetting) LoadBindingState(binding RatioProtectBinding) RatioProtectSourceState {
+	fingerprint := binding.Fingerprint()
+	loaded := RatioProtectSourceState{Binding: fingerprint}
+	if setting == nil {
+		return loaded
+	}
+	if setting.HasChannelSources() {
+		stored, ok := setting.SourceStates[fingerprint]
+		if !ok {
+			return loaded
+		}
+		loaded.LastSeen = CloneLastSeen(stored.LastSeen)
+		loaded.LastSeenGroups = CloneGroupRatioLastSeen(stored.LastSeenGroups)
+		return loaded
+	}
+	if setting.LastSeenSource != fingerprint {
+		return loaded
+	}
+	loaded.LastSeen = CloneLastSeen(setting.LastSeen)
+	loaded.LastSeenGroups = CloneGroupRatioLastSeen(setting.LastSeenGroupRatio)
+	return loaded
+}
+
+func (state RatioProtectSourceState) WithDecision(decision RatioProtectDecision) RatioProtectSourceState {
+	state.LastSeen = ApplyDecisionToLastSeen(CloneLastSeen(state.LastSeen), decision)
+	state.LastSeenGroups = ApplyDecisionToGroupRatioLastSeen(CloneGroupRatioLastSeen(state.LastSeenGroups), decision)
+	return state
 }
 
 func uniqueChannelIDs(values []int) []int {
@@ -199,11 +381,75 @@ func normalizeRatioProtectSetting(setting *RatioProtectSetting) {
 	if len(setting.ChannelIDs) == 0 && setting.ChannelID != 0 {
 		setting.ChannelIDs = []int{setting.ChannelID}
 	}
-	if len(setting.ChannelIDs) > 0 {
-		setting.ChannelID = setting.ChannelIDs[0]
-	}
 	setting.AuthToken = strings.TrimSpace(setting.AuthToken)
 	setting.SyncGroups = uniqueSyncGroups(setting.SyncGroups)
+	setting.Sources = normalizeRatioProtectSources(setting.Sources, setting)
+	if setting.Sources != nil {
+		ids := make([]int, 0, len(setting.Sources))
+		for _, source := range setting.Sources {
+			ids = append(ids, source.ChannelID)
+		}
+		setting.ChannelIDs = ids
+		setting.ChannelID = 0
+		if len(ids) > 0 {
+			setting.ChannelID = ids[0]
+		}
+	}
+	setting.SourceStates = pruneRatioProtectSourceStates(setting.SourceStates, setting.EffectiveBindings())
+}
+
+func normalizeRatioProtectSources(sources []RatioProtectChannelSource, setting *RatioProtectSetting) []RatioProtectChannelSource {
+	if sources == nil {
+		return nil
+	}
+	result := make([]RatioProtectChannelSource, 0, len(sources))
+	seen := make(map[int]struct{}, len(sources))
+	for _, source := range sources {
+		if source.ChannelID == 0 {
+			continue
+		}
+		if _, ok := seen[source.ChannelID]; ok {
+			continue
+		}
+		seen[source.ChannelID] = struct{}{}
+		switch source.Source {
+		case RatioProtectSourceSub2API:
+		default:
+			source.Source = RatioProtectSourceNewAPI
+		}
+		source.Endpoint = strings.TrimSpace(source.Endpoint)
+		source.UpstreamGroup = strings.TrimSpace(source.UpstreamGroup)
+		source.SyncGroups = uniqueSyncGroups(source.SyncGroups)
+		if source.MarkupMode != RatioProtectModeAdd && source.MarkupMode != RatioProtectModeMultiply {
+			source.MarkupMode = setting.MarkupMode
+			source.MarkupValue = setting.MarkupValue
+		} else if math.IsNaN(source.MarkupValue) || math.IsInf(source.MarkupValue, 0) || source.MarkupValue < 0 {
+			source.MarkupValue = setting.MarkupValue
+		}
+		result = append(result, source)
+	}
+	return result
+}
+
+// pruneRatioProtectSourceStates drops snapshots of bindings that no longer
+// exist, which is what makes editing a binding restart its snapshot.
+func pruneRatioProtectSourceStates(states map[string]RatioProtectSourceState, bindings []RatioProtectBinding) map[string]RatioProtectSourceState {
+	if len(states) == 0 {
+		return map[string]RatioProtectSourceState{}
+	}
+	current := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		current[binding.Fingerprint()] = struct{}{}
+	}
+	result := make(map[string]RatioProtectSourceState, len(states))
+	for fingerprint, state := range states {
+		if _, ok := current[fingerprint]; !ok {
+			continue
+		}
+		state.Binding = fingerprint
+		result[fingerprint] = state
+	}
+	return result
 }
 
 func ValidateRatioProtectOption(key, value string) error {
@@ -231,6 +477,27 @@ func ValidateRatioProtectOption(key, value string) error {
 		var ids []int
 		if err := common.UnmarshalJsonStr(value, &ids); err != nil {
 			return fmt.Errorf("channel_ids must be a JSON array of integers")
+		}
+	case "ratio_protect_setting.sources":
+		var sources []RatioProtectChannelSource
+		if err := common.UnmarshalJsonStr(value, &sources); err != nil {
+			return fmt.Errorf("sources must be a JSON array of channel sources")
+		}
+		for _, source := range sources {
+			if source.Source != RatioProtectSourceAuto && source.Source != RatioProtectSourceNewAPI && source.Source != RatioProtectSourceSub2API {
+				return fmt.Errorf("source must be newapi or sub2api")
+			}
+			if source.MarkupMode != RatioProtectSourceAuto && source.MarkupMode != RatioProtectModeAdd && source.MarkupMode != RatioProtectModeMultiply {
+				return fmt.Errorf("markup_mode must be add or multiply")
+			}
+			if source.MarkupValue < 0 || math.IsNaN(source.MarkupValue) || math.IsInf(source.MarkupValue, 0) {
+				return fmt.Errorf("markup_value must be a finite, non-negative number")
+			}
+		}
+	case "ratio_protect_setting.source_states":
+		var states map[string]RatioProtectSourceState
+		if err := common.UnmarshalJsonStr(value, &states); err != nil {
+			return fmt.Errorf("source_states must be a JSON object")
 		}
 	case "ratio_protect_setting.auth_token":
 		return nil
@@ -289,18 +556,15 @@ func nearlyEqualProtect(a, b float64) bool {
 	return b-a < epsilon
 }
 
-func ApplyProtectMarkup(value float64, setting *RatioProtectSetting) float64 {
-	if setting == nil {
-		return RoundProtectValue(value)
-	}
-	switch setting.MarkupMode {
+func ApplyProtectMarkup(value float64, markup RatioProtectMarkup) float64 {
+	switch markup.Mode {
 	case RatioProtectModeMultiply:
-		if setting.MarkupValue <= 0 {
+		if markup.Value <= 0 {
 			return RoundProtectValue(value)
 		}
-		return RoundProtectValue(value * setting.MarkupValue)
+		return RoundProtectValue(value * markup.Value)
 	default:
-		return RoundProtectValue(value + setting.MarkupValue)
+		return RoundProtectValue(value + markup.Value)
 	}
 }
 
@@ -357,15 +621,15 @@ func pricingSyncFieldMap(data map[string]any, field string) map[string]any {
 	}
 }
 
-func protectNumber(value any, setting *RatioProtectSetting) (float64, bool) {
+func protectNumber(value any, markup RatioProtectMarkup, skipZero bool) (float64, bool) {
 	number, ok := asProtectFloat64(value)
 	if !ok {
 		return 0, false
 	}
-	if setting.SkipZeroUpstream && number == 0 {
+	if skipZero && number == 0 {
 		return number, true
 	}
-	return ApplyProtectMarkup(number, setting), true
+	return ApplyProtectMarkup(number, markup), true
 }
 
 func asProtectFloat64(value any) (float64, bool) {
@@ -384,7 +648,7 @@ func asProtectFloat64(value any) (float64, bool) {
 }
 
 // ApplyProtectToPricingSyncData returns a copy of upstream sync data with
-// configuredkup applied to protectable numeric fields.
+// the configured markup applied to protectable numeric fields.
 func ApplyProtectToPricingSyncData(data map[string]any) map[string]any {
 	return ApplyProtectToPricingSyncDataWithSetting(data, GetRatioProtectSetting())
 }
@@ -404,7 +668,7 @@ func ApplyProtectToPricingSyncDataWithSetting(data map[string]any, setting *Rati
 		}
 		updated := make(map[string]any, len(entries))
 		for name, raw := range entries {
-			if protected, ok := protectNumber(raw, setting); ok {
+			if protected, ok := protectNumber(raw, setting.Markup(), setting.SkipZeroUpstream); ok {
 				updated[name] = protected
 				continue
 			}
@@ -461,14 +725,14 @@ func sameProtectFields(left, right map[string]float64) bool {
 	return true
 }
 
-func applyMarkupToFields(raw map[string]float64, setting *RatioProtectSetting) map[string]float64 {
+func applyMarkupToFields(raw map[string]float64, setting *RatioProtectSetting, markup RatioProtectMarkup) map[string]float64 {
 	target := make(map[string]float64, len(raw))
 	for field, value := range raw {
 		if setting.SkipZeroUpstream && value == 0 {
 			target[field] = value
 			continue
 		}
-		target[field] = ApplyProtectMarkup(value, setting)
+		target[field] = ApplyProtectMarkup(value, markup)
 	}
 	return target
 }
@@ -526,7 +790,7 @@ func localHasModel(localData map[string]any, name string) bool {
 // DecideRatioProtectActions compares raw upstream prices with the last-seen
 // snapshot. Local customizations are kept until the upstream value itself
 // changes; then local is rewritten to upstream plus markup.
-func DecideRatioProtectActions(localData, upstreamData map[string]any, lastSeen map[string]map[string]float64, setting *RatioProtectSetting) []RatioProtectDecision {
+func DecideRatioProtectActions(localData, upstreamData map[string]any, lastSeen map[string]map[string]float64, setting *RatioProtectSetting, markup RatioProtectMarkup) []RatioProtectDecision {
 	if setting == nil {
 		setting = GetRatioProtectSetting()
 	}
@@ -570,7 +834,7 @@ func DecideRatioProtectActions(localData, upstreamData map[string]any, lastSeen 
 			decisions = append(decisions, decision)
 			continue
 		}
-		target := applyMarkupToFields(raw, setting)
+		target := applyMarkupToFields(raw, setting, markup)
 		decision.Target = target
 		previous, seen := lastSeen[name]
 		if seen && isAnomalousChange(previous, raw, setting.MaxChangeFactor) {
@@ -767,7 +1031,7 @@ func localHasGroupRatio(localData map[string]any, name string) bool {
 	return ok
 }
 
-func DecideGroupRatioProtectActions(localData, upstreamData map[string]any, lastSeen map[string]float64, setting *RatioProtectSetting) []RatioProtectDecision {
+func DecideGroupRatioProtectActions(localData, upstreamData map[string]any, lastSeen map[string]float64, setting *RatioProtectSetting, markup RatioProtectMarkup) []RatioProtectDecision {
 	if setting == nil {
 		setting = GetRatioProtectSetting()
 	}
@@ -804,7 +1068,7 @@ func DecideGroupRatioProtectActions(localData, upstreamData map[string]any, last
 			decisions = append(decisions, decision)
 			continue
 		}
-		target := applyMarkupToFields(raw, setting)
+		target := applyMarkupToFields(raw, setting, markup)
 		decision.Target = target
 		previousValue, seen := lastSeen[name]
 		var previous map[string]float64
@@ -843,4 +1107,51 @@ func DecideGroupRatioProtectActions(localData, upstreamData map[string]any, last
 		decisions = append(decisions, decision)
 	}
 	return decisions
+}
+
+// MergeRatioProtectSourceDecisions keeps the first binding as the winner for
+// every model, so a model is always priced by exactly one upstream price. A
+// later binding that would write a different value is reported as a conflict
+// instead of silently overwriting the winner.
+func MergeRatioProtectSourceDecisions(sources []RatioProtectSourceDecisions) ([]RatioProtectDecision, map[string]string, []RatioProtectConflict) {
+	decisions := make([]RatioProtectDecision, 0)
+	winners := make(map[string]string)
+	winnerNames := make(map[string]string)
+	conflicts := make([]RatioProtectConflict, 0)
+	positions := make(map[string]int)
+	for _, source := range sources {
+		for _, decision := range source.Decisions {
+			position, seen := positions[decision.Name]
+			if !seen {
+				positions[decision.Name] = len(decisions)
+				decisions = append(decisions, decision)
+				winners[decision.Name] = source.Key
+				winnerNames[decision.Name] = source.Name
+				continue
+			}
+			winner := decisions[position]
+			changed := changedFields(winner.Target, decision.Target)
+			if len(changed) == 0 {
+				continue
+			}
+			conflicts = append(conflicts, RatioProtectConflict{
+				Model:       decision.Name,
+				Winner:      winnerNames[decision.Name],
+				Loser:       source.Name,
+				WinnerValue: cloneProtectFields(winner.Target),
+				LoserValue:  cloneProtectFields(decision.Target),
+				Changed:     changed,
+			})
+		}
+	}
+	return decisions, winners, conflicts
+}
+
+func cloneProtectFields(fields map[string]float64) map[string]float64 {
+	if len(fields) == 0 {
+		return nil
+	}
+	cloned := make(map[string]float64, len(fields))
+	maps.Copy(cloned, fields)
+	return cloned
 }

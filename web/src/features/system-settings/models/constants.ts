@@ -18,6 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 export const DEFAULT_ENDPOINT = '/api/pricing'
 
+// Sub2API gateways (kedaya.ai and others) publish their model plaza here. It
+// lists one price per group instead of new-api's /api/pricing payload.
+export const SUB2API_ENDPOINT = '/api/v1/model-plaza'
+
 // ---------------------------------------------------------------------------
 // Built-in upstream ratio presets
 //

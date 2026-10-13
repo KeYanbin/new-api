@@ -18,14 +18,11 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
 import type { Resolver } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import * as z from 'zod'
 
-import { MultiSelect } from '@/components/multi-select'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -63,12 +60,21 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
 import { useUpdateOption } from '../hooks/use-update-option'
-import { ChannelSelectorDialog } from '../models/channel-selector-dialog'
-import { DEFAULT_ENDPOINT } from '../models/constants'
-import { getUpstreamDisplayName } from '../models/upstream-ratio-sync-helpers'
 import { safeNumberFieldProps } from '../utils/numeric-field'
+import { RatioProtectBindings } from './ratio-protect-bindings'
 
 const markupModes = ['add', 'multiply'] as const
+const sourceTypes = ['newapi', 'sub2api'] as const
+
+const channelSourceSchema = z.object({
+  channel_id: z.number().int(),
+  source: z.enum(sourceTypes),
+  endpoint: z.string(),
+  upstream_group: z.string(),
+  sync_groups: z.array(z.string()),
+  markup_mode: z.enum(markupModes),
+  markup_value: z.coerce.number().min(0),
+})
 
 const createRatioProtectSchema = (t: (key: string) => string) =>
   z
@@ -77,12 +83,9 @@ const createRatioProtectSchema = (t: (key: string) => string) =>
         enabled: z.boolean(),
         auto_apply: z.boolean(),
         interval_minutes: z.coerce.number().int().min(5).max(1440),
-        channel_id: z.coerce.number().int(),
-        channel_ids: z.array(z.number().int()),
-        endpoint: z.string(),
+        sources: z.array(channelSourceSchema),
         has_auth_token: z.boolean(),
         auth_token: z.string(),
-        sync_groups: z.array(z.string()),
         markup_mode: z.enum(markupModes),
         markup_value: z.coerce.number().min(0),
         protect_model_ratio: z.boolean(),
@@ -95,13 +98,32 @@ const createRatioProtectSchema = (t: (key: string) => string) =>
     })
     .superRefine((data, ctx) => {
       const setting = data.ratio_protect_setting
-      if (setting.enabled && setting.channel_ids.length === 0) {
+      if (setting.enabled && setting.sources.length === 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['ratio_protect_setting', 'channel_ids'],
+          path: ['ratio_protect_setting', 'sources'],
           message: t('Select an upstream source before enabling protection'),
         })
       }
+      setting.sources.forEach((source, index) => {
+        if (source.channel_id === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['ratio_protect_setting', 'sources', index, 'channel_id'],
+            message: t('Select a channel for every binding'),
+          })
+        }
+        if (
+          source.source === 'sub2api' &&
+          source.upstream_group.trim() === ''
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['ratio_protect_setting', 'sources', index, 'upstream_group'],
+            message: t('Select the upstream price group'),
+          })
+        }
+      })
       if (
         !setting.protect_model_ratio &&
         !setting.protect_model_price &&
@@ -117,22 +139,23 @@ const createRatioProtectSchema = (t: (key: string) => string) =>
       }
     })
 
-type RatioProtectFormValues = z.infer<ReturnType<typeof createRatioProtectSchema>>
+type RatioProtectFormValues = z.infer<
+  ReturnType<typeof createRatioProtectSchema>
+>
 
-export type RatioProtectSectionValues = RatioProtectFormValues['ratio_protect_setting']
+export type RatioProtectSectionValues =
+  RatioProtectFormValues['ratio_protect_setting']
 
 type RatioProtectSectionProps = {
   defaultValues: RatioProtectSectionValues
 }
 
-export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps) {
+export function RatioProtectSection({
+  defaultValues,
+}: RatioProtectSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const schema = createRatioProtectSchema(t)
-  const [channelDialogOpen, setChannelDialogOpen] = useState(false)
-  const [channelEndpoints, setChannelEndpoints] = useState<
-    Record<number, string>
-  >({})
   const { data: channelsData } = useQuery({
     queryKey: ['upstream-channels'],
     queryFn: async () => requireServerSuccess(await getUpstreamChannels()),
@@ -165,40 +188,15 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
         RatioProtectFormValues
       >,
       defaultValues: { ratio_protect_setting: defaultValues },
+      submitUnchanged: true,
       onSubmit: async (data, changedFields) => {
-        const channelIdsChanged = Object.keys(changedFields).some(
-          (key) =>
-            key === 'ratio_protect_setting.channel_ids' ||
-            key.startsWith('ratio_protect_setting.channel_ids.')
-        )
-        if (channelIdsChanged) {
-          const channelIds = data.ratio_protect_setting.channel_ids
-          await updateOption.mutateAsync({
-            key: 'ratio_protect_setting.channel_ids',
-            value: JSON.stringify(channelIds),
-          })
-          await updateOption.mutateAsync({
-            key: 'ratio_protect_setting.channel_id',
-            value: channelIds[0] ?? 0,
-          })
-        }
-        const syncGroupsChanged = Object.keys(changedFields).some(
-          (key) =>
-            key === 'ratio_protect_setting.sync_groups' ||
-            key.startsWith('ratio_protect_setting.sync_groups.')
-        )
-        if (syncGroupsChanged) {
-          await updateOption.mutateAsync({
-            key: 'ratio_protect_setting.sync_groups',
-            value: JSON.stringify(data.ratio_protect_setting.sync_groups),
-          })
-        }
+        await updateOption.mutateAsync({
+          key: 'ratio_protect_setting.sources',
+          value: JSON.stringify(data.ratio_protect_setting.sources),
+        })
         const authToken = data.ratio_protect_setting.auth_token.trim()
         if (
-          Object.prototype.hasOwnProperty.call(
-            changedFields,
-            'ratio_protect_setting.auth_token'
-          ) &&
+          Object.hasOwn(changedFields, 'ratio_protect_setting.auth_token') &&
           authToken !== ''
         ) {
           await updateOption.mutateAsync({
@@ -208,17 +206,20 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
         }
         for (const [key, value] of Object.entries(changedFields)) {
           if (
+            key === 'ratio_protect_setting.sources' ||
+            key.startsWith('ratio_protect_setting.sources.') ||
             key === 'ratio_protect_setting.channel_ids' ||
-            key.startsWith('ratio_protect_setting.channel_ids.') ||
             key === 'ratio_protect_setting.channel_id' ||
-            key === 'ratio_protect_setting.sync_groups' ||
-            key.startsWith('ratio_protect_setting.sync_groups.') ||
             key === 'ratio_protect_setting.auth_token' ||
             key === 'ratio_protect_setting.has_auth_token'
           ) {
             continue
           }
-          if (value === undefined || value === null || typeof value === 'object') {
+          if (
+            value === undefined ||
+            value === null ||
+            typeof value === 'object'
+          ) {
             continue
           }
           await updateOption.mutateAsync({
@@ -230,11 +231,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
     })
 
   const enabled = form.watch('ratio_protect_setting.enabled')
-  const selectedChannelIds =
-    form.watch('ratio_protect_setting.channel_ids') ?? []
-  const selectedChannels = channels.filter((channel) =>
-    selectedChannelIds.includes(channel.id)
-  )
+  const sources = form.watch('ratio_protect_setting.sources') ?? []
+  const defaultMarkupMode = form.watch('ratio_protect_setting.markup_mode')
+  const defaultMarkupValue = form.watch('ratio_protect_setting.markup_value')
 
   return (
     <>
@@ -258,7 +257,7 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                     <FormLabel>{t('Enable automatic follow')}</FormLabel>
                     <FormDescription>
                       {t(
-                        'Poll selected upstream sources and keep local sell ratios at upstream plus markup.'
+                        'Poll every bound channel upstream and keep local sell ratios at that upstream price plus markup.'
                       )}
                     </FormDescription>
                   </SettingsSwitchContent>
@@ -277,7 +276,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
               render={({ field }) => (
                 <SettingsSwitchItem>
                   <SettingsSwitchContent>
-                    <FormLabel>{t('Write local prices automatically')}</FormLabel>
+                    <FormLabel>
+                      {t('Write local prices automatically')}
+                    </FormLabel>
                     <FormDescription>
                       {t(
                         'When the upstream value itself changes, overwrite local with upstream plus markup. Manual local edits are kept until that happens.'
@@ -296,73 +297,29 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
             <SettingsFormGrid>
               <FormField
                 control={form.control}
-                name='ratio_protect_setting.channel_ids'
-                render={({ field }) => (
+                name='ratio_protect_setting.sources'
+                render={() => (
                   <FormItem className='sm:col-span-2'>
-                    <FormLabel>{t('Listen sources')}</FormLabel>
-                    <div className='flex flex-wrap items-center gap-2'>
-                      <Button
-                        type='button'
-                        variant='outline'
-                        onClick={() => setChannelDialogOpen(true)}
-                      >
-                        {t('Select price sources')}
-                      </Button>
-                      {selectedChannels.length === 0 ? (
-                        <span className='text-muted-foreground text-sm'>
-                          {t('Select a channel')}
-                        </span>
-                      ) : (
-                        selectedChannels.map((channel) => (
-                          <Badge key={channel.id} variant='secondary'>
-                            {getUpstreamDisplayName(channel.name, t)}
-                          </Badge>
-                        ))
-                      )}
-                    </div>
-                    <FormDescription>
-                      {t(
-                        'Poll every selected source. Shared models keep the first source; changing the source list resets the last-seen snapshot.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                    <ChannelSelectorDialog
-                      open={channelDialogOpen}
-                      onOpenChange={setChannelDialogOpen}
+                    <FormLabel>{t('Channel bindings')}</FormLabel>
+                    <RatioProtectBindings
+                      value={sources}
+                      errors={
+                        form.formState.errors.ratio_protect_setting?.sources
+                      }
+                      onChange={(next) =>
+                        form.setValue('ratio_protect_setting.sources', next, {
+                          shouldDirty: true,
+                          shouldValidate: form.formState.isSubmitted,
+                        })
+                      }
                       channels={channels}
-                      selectedChannelIds={field.value}
-                      onSelectedChannelIdsChange={field.onChange}
-                      channelEndpoints={channelEndpoints}
-                      onChannelEndpointsChange={setChannelEndpoints}
-                      showEndpointColumn={false}
-                      onConfirm={(ids) => {
-                        field.onChange(ids)
-                        form.setValue(
-                          'ratio_protect_setting.channel_id',
-                          ids[0] ?? 0,
-                          { shouldDirty: true }
-                        )
-                      }}
+                      groupOptions={groupOptions}
+                      defaultMarkupMode={defaultMarkupMode}
+                      defaultMarkupValue={defaultMarkupValue}
                     />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='ratio_protect_setting.endpoint'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Upstream endpoint')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        value={field.value}
-                        onChange={field.onChange}
-                        placeholder={DEFAULT_ENDPOINT}
-                      />
-                    </FormControl>
                     <FormDescription>
                       {t(
-                        'Use /api/pricing, /api/ratio_config, openrouter, or a full URL.'
+                        'Bind every channel to the upstream price it buys from. Shared models keep the first binding and are reported as conflicts.'
                       )}
                     </FormDescription>
                     <FormMessage />
@@ -388,31 +345,8 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                       {defaultValues.has_auth_token
                         ? t('Leave blank to keep the existing credential')
                         : t(
-                            'Dashboard login token or personal access token for upstream /api/pricing. Channel keys are not accepted by that endpoint.'
+                            'Dashboard login token for upstream /api/pricing, or a Sub2API panel JWT when the price list needs authentication. Channel keys are not accepted by these endpoints.'
                           )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='ratio_protect_setting.sync_groups'
-                render={({ field }) => (
-                  <FormItem className='sm:col-span-2'>
-                    <FormLabel>{t('Sync groups')}</FormLabel>
-                    <FormControl>
-                      <MultiSelect
-                        options={groupOptions}
-                        selected={field.value}
-                        onChange={field.onChange}
-                        placeholder={t('Select groups to sync')}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Only follow models enabled for these groups, and only these group ratios. Leave empty to sync every group from the listen sources.'
-                      )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -423,7 +357,7 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                 name='ratio_protect_setting.markup_mode'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t('Markup mode')}</FormLabel>
+                    <FormLabel>{t('Default markup mode')}</FormLabel>
                     <Select
                       items={[
                         { value: 'add', label: t('Add to upstream') },
@@ -439,7 +373,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                       </FormControl>
                       <SelectContent alignItemWithTrigger={false}>
                         <SelectGroup>
-                          <SelectItem value='add'>{t('Add to upstream')}</SelectItem>
+                          <SelectItem value='add'>
+                            {t('Add to upstream')}
+                          </SelectItem>
                           <SelectItem value='multiply'>
                             {t('Multiply upstream')}
                           </SelectItem>
@@ -448,7 +384,7 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                     </Select>
                     <FormDescription>
                       {t(
-                        'Add uses local = upstream + markup. Multiply uses local = upstream × markup.'
+                        'Applied to bindings that do not set their own markup. Add uses local = upstream + markup, multiply uses local = upstream × markup.'
                       )}
                     </FormDescription>
                     <FormMessage />
@@ -460,7 +396,7 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                 name='ratio_protect_setting.markup_value'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t('Markup value')}</FormLabel>
+                    <FormLabel>{t('Default markup value')}</FormLabel>
                     <FormControl>
                       <Input
                         type='number'
@@ -531,7 +467,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                   <SettingsSwitchContent>
                     <FormLabel>{t('Protect model ratio')}</FormLabel>
                     <FormDescription>
-                      {t('Follow token-based model_ratio from the listen sources.')}
+                      {t(
+                        'Follow the token price of each bound upstream into model_ratio.'
+                      )}
                     </FormDescription>
                   </SettingsSwitchContent>
                   <FormControl>
@@ -551,7 +489,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                   <SettingsSwitchContent>
                     <FormLabel>{t('Protect fixed price')}</FormLabel>
                     <FormDescription>
-                      {t('Follow request-based model_price from the listen sources.')}
+                      {t(
+                        'Follow the per-request price of each bound upstream into model_price.'
+                      )}
                     </FormDescription>
                   </SettingsSwitchContent>
                   <FormControl>
@@ -615,7 +555,9 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                   <SettingsSwitchContent>
                     <FormLabel>{t('Notify on follow')}</FormLabel>
                     <FormDescription>
-                      {t('Send a root notification when local prices are rewritten.')}
+                      {t(
+                        'Send a root notification when local prices are rewritten.'
+                      )}
                     </FormDescription>
                   </SettingsSwitchContent>
                   <FormControl>
@@ -632,9 +574,7 @@ export function RatioProtectSection({ defaultValues }: RatioProtectSectionProps)
                 type='button'
                 variant='outline'
                 disabled={
-                  !enabled ||
-                  selectedChannelIds.length === 0 ||
-                  triggerMutation.isPending
+                  !enabled || sources.length === 0 || triggerMutation.isPending
                 }
                 onClick={() => triggerMutation.mutate()}
               >

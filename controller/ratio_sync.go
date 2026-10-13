@@ -274,55 +274,118 @@ func newUpstreamRatioHTTPClient() *http.Client {
 	return &http.Client{Transport: transport}
 }
 
+// upstreamFetchOptions selects how one upstream price is fetched. Sub2API
+// gateways reject a channel key on their public endpoints, so those sources
+// only send the dedicated token.
+type upstreamFetchOptions struct {
+	Source         string
+	UpstreamGroup  string
+	AuthToken      string
+	SkipChannelKey bool
+}
+
+type upstreamPriceData struct {
+	Data  map[string]any
+	Notes []string
+}
+
+// upstreamFetchResult carries the raw response plus the converter to use.
+type upstreamFetchResult struct {
+	Body       []byte
+	OpenRouter bool
+	ModelsDev  bool
+	Sub2API    bool
+}
+
 func fetchOneUpstreamRatio(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int) (map[string]any, error) {
-	return fetchOneUpstreamRatioWithAuth(parent, client, chItem, timeoutSeconds, "")
+	data, err := fetchUpstreamPriceData(parent, client, chItem, timeoutSeconds, upstreamFetchOptions{})
+	return data.Data, err
 }
 
 func fetchOneUpstreamRatioWithAuth(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int, authToken string) (map[string]any, error) {
-	isOpenRouter := chItem.Endpoint == "openrouter"
-	endpoint := chItem.Endpoint
-	var fullURL string
-	if isOpenRouter {
-		fullURL = chItem.BaseURL + "/v1/models"
-	} else if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
-		fullURL = endpoint
-	} else {
-		if endpoint == "" {
-			endpoint = defaultEndpoint
-		} else if !strings.HasPrefix(endpoint, "/") {
-			endpoint = "/" + endpoint
-		}
-		fullURL = chItem.BaseURL + endpoint
+	data, err := fetchUpstreamPriceData(parent, client, chItem, timeoutSeconds, upstreamFetchOptions{AuthToken: authToken})
+	return data.Data, err
+}
+
+func fetchUpstreamPriceData(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int, opts upstreamFetchOptions) (upstreamPriceData, error) {
+	if opts.Source == ratio_setting.RatioProtectSourceSub2API && strings.TrimSpace(opts.UpstreamGroup) == "" {
+		return upstreamPriceData{}, fmt.Errorf("select an upstream group for this Sub2API source")
 	}
-	isModelsDev := isModelsDevAPIEndpoint(fullURL)
+	result, err := fetchUpstreamBody(parent, client, chItem, timeoutSeconds, opts)
+	if err != nil {
+		return upstreamPriceData{}, err
+	}
+	switch {
+	case result.OpenRouter:
+		data, err := convertOpenRouterToRatioData(bytes.NewReader(result.Body))
+		return upstreamPriceData{Data: data}, err
+	case result.ModelsDev:
+		data, err := convertModelsDevToRatioData(bytes.NewReader(result.Body))
+		return upstreamPriceData{Data: data}, err
+	case result.Sub2API:
+		data, notes, err := convertSub2APIPlazaToRatioData(bytes.NewReader(result.Body), opts.UpstreamGroup)
+		return upstreamPriceData{Data: data, Notes: notes}, err
+	default:
+		data, err := parseUpstreamRatioBody(result.Body)
+		return upstreamPriceData{Data: data}, err
+	}
+}
+
+func resolveUpstreamFullURL(chItem dto.UpstreamDTO) string {
+	if chItem.Endpoint == "openrouter" {
+		return chItem.BaseURL + "/v1/models"
+	}
+	endpoint := chItem.Endpoint
+	if endpoint == "" {
+		endpoint = defaultEndpoint
+	}
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		endpoint = "/" + endpoint
+	}
+	return chItem.BaseURL + endpoint
+}
+
+func fetchUpstreamBody(parent context.Context, client *http.Client, chItem dto.UpstreamDTO, timeoutSeconds int, opts upstreamFetchOptions) (upstreamFetchResult, error) {
+	isOpenRouter := opts.Source != ratio_setting.RatioProtectSourceSub2API && chItem.Endpoint == "openrouter"
+	fullURL := resolveUpstreamFullURL(chItem)
+	if opts.Source == ratio_setting.RatioProtectSourceSub2API && chItem.Endpoint == "" {
+		chItem.Endpoint = ratio_setting.RatioProtectSub2APIDefaultEndpoint
+		fullURL = resolveUpstreamFullURL(chItem)
+	}
+	isModelsDev := opts.Source != ratio_setting.RatioProtectSourceSub2API && isModelsDevAPIEndpoint(fullURL)
+	isSub2API := opts.Source == ratio_setting.RatioProtectSourceSub2API ||
+		(opts.Source == ratio_setting.RatioProtectSourceAuto && isSub2APIPlazaEndpoint(fullURL))
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
-		return nil, err
+		return upstreamFetchResult{}, err
 	}
-	authToken = strings.TrimSpace(authToken)
+	authToken := strings.TrimSpace(opts.AuthToken)
 	if isOpenRouter && chItem.ID == 0 && authToken == "" {
-		return nil, fmt.Errorf("OpenRouter requires a valid channel with API key")
+		return upstreamFetchResult{}, fmt.Errorf("OpenRouter requires a valid channel with API key")
 	}
 	sendDedicatedAuth := authToken != "" && chItem.ID > 0 && !isModelsDev
 	if sendDedicatedAuth {
 		httpReq.Header.Set("Authorization", "Bearer "+authToken)
-	} else if chItem.ID > 0 && !isModelsDev && model.DB != nil {
+	} else if chItem.ID > 0 && !isModelsDev && !opts.SkipChannelKey && model.DB != nil {
 		dbCh, err := model.GetChannelById(chItem.ID, true)
 		if err != nil {
 			if isOpenRouter {
-				return nil, fmt.Errorf("failed to get channel key: %w", err)
+				return upstreamFetchResult{}, fmt.Errorf("failed to get channel key: %w", err)
 			}
 		} else if key, _, apiErr := dbCh.GetNextEnabledKey(); apiErr != nil {
 			if isOpenRouter {
-				return nil, fmt.Errorf("failed to get enabled channel key: %s", apiErr.Error())
+				return upstreamFetchResult{}, fmt.Errorf("failed to get enabled channel key: %s", apiErr.Error())
 			}
 		} else if key = strings.TrimSpace(key); key != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+key)
 		} else if isOpenRouter {
-			return nil, fmt.Errorf("no API key configured for this channel")
+			return upstreamFetchResult{}, fmt.Errorf("no API key configured for this channel")
 		}
 	}
 
@@ -336,11 +399,11 @@ func fetchOneUpstreamRatioWithAuth(parent context.Context, client *http.Client, 
 		time.Sleep(time.Duration(200*(1<<attempt)) * time.Millisecond)
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return upstreamFetchResult{}, lastErr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s", resp.Status)
+		return upstreamFetchResult{}, fmt.Errorf("%s", resp.Status)
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
 		logger.LogWarn(parent, "unexpected content-type from "+chItem.Name+": "+ct)
@@ -348,15 +411,9 @@ func fetchOneUpstreamRatioWithAuth(parent context.Context, client *http.Client, 
 	limited := io.LimitReader(resp.Body, maxRatioConfigBytes)
 	bodyBytes, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, err
+		return upstreamFetchResult{}, err
 	}
-	if isOpenRouter {
-		return convertOpenRouterToRatioData(bytes.NewReader(bodyBytes))
-	}
-	if isModelsDev {
-		return convertModelsDevToRatioData(bytes.NewReader(bodyBytes))
-	}
-	return parseUpstreamRatioBody(bodyBytes)
+	return upstreamFetchResult{Body: bodyBytes, OpenRouter: isOpenRouter, ModelsDev: isModelsDev, Sub2API: isSub2API}, nil
 }
 
 func parseGroupRatioMap(raw json.RawMessage) map[string]any {
@@ -561,26 +618,6 @@ func resolveProtectUpstreamDTO(channelID int, endpoint string) (dto.UpstreamDTO,
 	return dto.UpstreamDTO{ID: channel.Id, Name: channel.Name, BaseURL: base, Endpoint: endpoint}, nil
 }
 
-func resolveProtectUpstreamDTOs(setting *ratio_setting.RatioProtectSetting) ([]dto.UpstreamDTO, error) {
-	if setting == nil {
-		return nil, fmt.Errorf("ratio protect setting is required")
-	}
-	channelIDs := setting.SelectedChannelIDs()
-	if len(channelIDs) == 0 {
-		return nil, fmt.Errorf("select an upstream channel before enabling ratio protection")
-	}
-	endpoint := strings.TrimSpace(setting.Endpoint)
-	upstreams := make([]dto.UpstreamDTO, 0, len(channelIDs))
-	for _, channelID := range channelIDs {
-		upstream, err := resolveProtectUpstreamDTO(channelID, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		upstreams = append(upstreams, upstream)
-	}
-	return upstreams, nil
-}
-
 func mergeProtectUpstreamData(sources []map[string]any) map[string]any {
 	merged := map[string]any{}
 	for _, source := range sources {
@@ -603,35 +640,6 @@ func mergeProtectUpstreamData(sources []map[string]any) map[string]any {
 		}
 	}
 	return merged
-}
-
-func fetchProtectUpstreamData(ctx context.Context, setting *ratio_setting.RatioProtectSetting) (map[string]any, []dto.UpstreamDTO, error) {
-	upstreams, err := resolveProtectUpstreamDTOs(setting)
-	if err != nil {
-		return nil, nil, err
-	}
-	client := newUpstreamRatioHTTPClient()
-	sources := make([]map[string]any, 0, len(upstreams))
-	succeeded := make([]dto.UpstreamDTO, 0, len(upstreams))
-	var failures []string
-	authToken := strings.TrimSpace(setting.AuthToken)
-	for _, upstream := range upstreams {
-		data, fetchErr := fetchOneUpstreamRatioWithAuth(ctx, client, upstream, defaultTimeoutSeconds, authToken)
-		if fetchErr != nil {
-			failures = append(failures, fmt.Sprintf("%s(%d): %s", upstream.Name, upstream.ID, fetchErr.Error()))
-			continue
-		}
-		sources = append(sources, data)
-		succeeded = append(succeeded, upstream)
-	}
-	if len(sources) == 0 {
-		return nil, upstreams, fmt.Errorf("all protect sources failed: %s", strings.Join(failures, "; "))
-	}
-	if len(failures) > 0 {
-		logger.LogWarn(ctx, "ratio protect skipped failed sources: "+strings.Join(failures, "; "))
-	}
-	merged := mergeProtectUpstreamData(sources)
-	return ratio_setting.FilterPricingSyncDataByGroups(merged, setting.SelectedSyncGroups(), model.GetModelEnableGroups), succeeded, nil
 }
 
 func FetchUpstreamRatios(c *gin.Context) {
@@ -1218,6 +1226,332 @@ func convertModelsDevToRatioData(reader io.Reader) (map[string]any, error) {
 		converted["cache_ratio"] = cacheRatioMap
 	}
 	return converted, nil
+}
+
+const sub2APIPlazaPath = "/api/v1/model-plaza"
+
+const sub2APIBillingModeToken = "token"
+
+// sub2APIPlazaResponse is the Sub2API model plaza payload (kedaya.ai and other
+// Sub2API gateways). Prices are per-token base prices; the actual charge is the
+// base price multiplied by the group rate multiplier.
+type sub2APIPlazaResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    sub2APIPlazaGroups `json:"data"`
+}
+
+type sub2APIPlazaGroups struct {
+	Groups []sub2APIPlazaGroup `json:"groups"`
+}
+
+type sub2APIPlazaGroup struct {
+	ID                   int64               `json:"id"`
+	Name                 string              `json:"name"`
+	Platform             string              `json:"platform"`
+	RateMultiplier       float64             `json:"rate_multiplier"`
+	PeakRateEnabled      bool                `json:"peak_rate_enabled"`
+	PeakRateMultiplier   float64             `json:"peak_rate_multiplier"`
+	ImageRateIndependent bool                `json:"image_rate_independent"`
+	ImageRateMultiplier  float64             `json:"image_rate_multiplier"`
+	VideoRateIndependent bool                `json:"video_rate_independent"`
+	VideoRateMultiplier  float64             `json:"video_rate_multiplier"`
+	Models               []sub2APIPlazaModel `json:"models"`
+}
+
+type sub2APIPlazaModel struct {
+	Name     string               `json:"name"`
+	Platform string               `json:"platform"`
+	Pricing  *sub2APIPlazaPricing `json:"pricing"`
+}
+
+type sub2APIPlazaPricing struct {
+	BillingMode     string                    `json:"billing_mode"`
+	InputPrice      *float64                  `json:"input_price"`
+	OutputPrice     *float64                  `json:"output_price"`
+	CacheWritePrice *float64                  `json:"cache_write_price"`
+	CacheReadPrice  *float64                  `json:"cache_read_price"`
+	PerRequestPrice *float64                  `json:"per_request_price"`
+	Intervals       []sub2APIPlazaPricingTier `json:"intervals"`
+}
+
+// sub2APIPlazaPricingTier is one context-length tier of a Sub2API price.
+type sub2APIPlazaPricingTier struct {
+	MinTokens       *int64   `json:"min_tokens"`
+	MaxTokens       *int64   `json:"max_tokens"`
+	TierLabel       string   `json:"tier_label"`
+	InputPrice      *float64 `json:"input_price"`
+	OutputPrice     *float64 `json:"output_price"`
+	CacheWritePrice *float64 `json:"cache_write_price"`
+	CacheReadPrice  *float64 `json:"cache_read_price"`
+	PerRequestPrice *float64 `json:"per_request_price"`
+}
+
+// basePrice returns the tier that a flat local price can follow: the cheapest
+// context-length tier, which always starts at 0 tokens.
+func (pricing *sub2APIPlazaPricing) basePrice() *sub2APIPlazaPricing {
+	if pricing == nil || len(pricing.Intervals) == 0 {
+		return pricing
+	}
+	var selected *sub2APIPlazaPricingTier
+	for index := range pricing.Intervals {
+		tier := &pricing.Intervals[index]
+		if tier.MinTokens == nil || *tier.MinTokens == 0 {
+			selected = tier
+			break
+		}
+		if selected == nil || *tier.MinTokens < *selected.MinTokens {
+			selected = tier
+		}
+	}
+	if selected == nil {
+		return pricing
+	}
+	return &sub2APIPlazaPricing{
+		BillingMode:     pricing.BillingMode,
+		InputPrice:      selected.InputPrice,
+		OutputPrice:     selected.OutputPrice,
+		CacheWritePrice: selected.CacheWritePrice,
+		CacheReadPrice:  selected.CacheReadPrice,
+		PerRequestPrice: selected.PerRequestPrice,
+	}
+}
+
+// rate returns the multiplier the gateway charges with. A missing or invalid
+// multiplier falls back to 1, which never under-prices the upstream.
+func (group sub2APIPlazaGroup) rate() float64 {
+	if math.IsNaN(group.RateMultiplier) || math.IsInf(group.RateMultiplier, 0) || group.RateMultiplier <= 0 {
+		return 1
+	}
+	return group.RateMultiplier
+}
+
+func (group sub2APIPlazaGroup) requestRate(billingMode string) float64 {
+	switch strings.ToLower(strings.TrimSpace(billingMode)) {
+	case "image":
+		if group.ImageRateIndependent && group.ImageRateMultiplier > 0 {
+			return group.ImageRateMultiplier
+		}
+	case "video":
+		if group.VideoRateIndependent && group.VideoRateMultiplier > 0 {
+			return group.VideoRateMultiplier
+		}
+	}
+	return group.rate()
+}
+
+func isSub2APIPlazaEndpoint(rawURL string) bool {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSuffix(parsedURL.Path, "/"), sub2APIPlazaPath)
+}
+
+func parseSub2APIPlazaGroups(bodyBytes []byte) ([]sub2APIPlazaGroup, error) {
+	var body sub2APIPlazaResponse
+	if err := common.Unmarshal(bodyBytes, &body); err != nil {
+		return nil, fmt.Errorf("无法解析 Sub2API 模型广场数据: %w", err)
+	}
+	if body.Code != 0 {
+		message := strings.TrimSpace(body.Message)
+		if message == "" {
+			message = strconv.Itoa(body.Code)
+		}
+		return nil, fmt.Errorf("Sub2API 返回错误: %s", message)
+	}
+	return body.Data.Groups, nil
+}
+
+func selectSub2APIPlazaGroup(groups []sub2APIPlazaGroup, upstreamGroup string) (sub2APIPlazaGroup, error) {
+	target := strings.TrimSpace(upstreamGroup)
+	if target == "" {
+		return sub2APIPlazaGroup{}, fmt.Errorf("select an upstream group for this Sub2API source")
+	}
+	if id, err := strconv.ParseInt(target, 10, 64); err == nil {
+		for _, group := range groups {
+			if group.ID == id {
+				return group, nil
+			}
+		}
+	}
+	for _, group := range groups {
+		if strings.EqualFold(strings.TrimSpace(group.Name), target) {
+			return group, nil
+		}
+	}
+	names := make([]string, 0, len(groups))
+	for _, group := range groups {
+		names = append(names, strings.TrimSpace(group.Name))
+	}
+	sort.Strings(names)
+	return sub2APIPlazaGroup{}, fmt.Errorf("上游分组 %q 不存在，可选：%s", target, strings.Join(names, ", "))
+}
+
+// convertSub2APIPlazaToRatioData converts one group's Sub2API prices into local
+// ratios. Tiered prices follow their cheapest context-length tier because a
+// flat local ratio cannot express tiers; those models are reported as notes.
+func convertSub2APIPlazaToRatioData(reader io.Reader, upstreamGroup string) (map[string]any, []string, error) {
+	bodyBytes, err := io.ReadAll(io.LimitReader(reader, maxRatioConfigBytes))
+	if err != nil {
+		return nil, nil, err
+	}
+	groups, err := parseSub2APIPlazaGroups(bodyBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	group, err := selectSub2APIPlazaGroup(groups, upstreamGroup)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	modelRatioMap := make(map[string]any)
+	completionRatioMap := make(map[string]any)
+	cacheRatioMap := make(map[string]any)
+	createCacheRatioMap := make(map[string]any)
+	modelPriceMap := make(map[string]any)
+	tieredModels := make([]string, 0)
+	for _, model := range group.Models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" || model.Pricing == nil {
+			continue
+		}
+		if len(model.Pricing.Intervals) > 1 {
+			tieredModels = append(tieredModels, name)
+		}
+		price := model.Pricing.basePrice()
+		isTokenPricing := strings.EqualFold(price.BillingMode, sub2APIBillingModeToken) || price.PerRequestPrice == nil
+		if !isTokenPricing {
+			if value, ok := validNonNegativePrice(price.PerRequestPrice); ok {
+				modelPriceMap[name] = roundRatioValue(value * group.requestRate(price.BillingMode))
+			}
+			continue
+		}
+		input, ok := validNonNegativePrice(price.InputPrice)
+		if !ok {
+			continue
+		}
+		if input == 0 {
+			modelRatioMap[name] = 0.0
+			continue
+		}
+		// The plaza lists the base price; the gateway charges the group rate on top
+		// of it, which is exactly what the local price has to cover.
+		paidInput := input * group.rate()
+		modelRatioMap[name] = roundRatioValue(paidInput * 1e6 * float64(ratio_setting.USD) / modelsDevInputCostRatioBase)
+		if output, ok := validNonNegativePrice(price.OutputPrice); ok {
+			completionRatioMap[name] = roundRatioValue(output / input)
+		}
+		if cacheRead, ok := validNonNegativePrice(price.CacheReadPrice); ok {
+			cacheRatioMap[name] = roundRatioValue(cacheRead / input)
+		}
+		if cacheWrite, ok := validNonNegativePrice(price.CacheWritePrice); ok {
+			createCacheRatioMap[name] = roundRatioValue(cacheWrite / input)
+		}
+	}
+
+	converted := make(map[string]any)
+	if len(modelRatioMap) > 0 {
+		converted["model_ratio"] = modelRatioMap
+	}
+	if len(completionRatioMap) > 0 {
+		converted["completion_ratio"] = completionRatioMap
+	}
+	if len(cacheRatioMap) > 0 {
+		converted["cache_ratio"] = cacheRatioMap
+	}
+	if len(createCacheRatioMap) > 0 {
+		converted["create_cache_ratio"] = createCacheRatioMap
+	}
+	if len(modelPriceMap) > 0 {
+		converted["model_price"] = modelPriceMap
+	}
+
+	notes := make([]string, 0, 2)
+	if len(tieredModels) > 0 {
+		sort.Strings(tieredModels)
+		display := tieredModels
+		if len(display) > 8 {
+			display = display[:8]
+		}
+		note := fmt.Sprintf("分组 %s：%d 个模型上游为阶梯计价，本地按首档价跟随（%s", group.Name, len(tieredModels), strings.Join(display, ", "))
+		if len(tieredModels) > len(display) {
+			note += fmt.Sprintf(" 等 %d 个", len(tieredModels))
+		}
+		notes = append(notes, note+"）")
+	}
+	if group.PeakRateEnabled {
+		notes = append(notes, fmt.Sprintf("分组 %s：上游开启高峰计价（倍率 %g），本地按基础倍率跟随", group.Name, group.PeakRateMultiplier))
+	}
+	return converted, notes, nil
+}
+
+func validNonNegativePrice(value *float64) (float64, bool) {
+	if value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 {
+		return 0, false
+	}
+	return *value, true
+}
+
+// fetchUpstreamPriceGroups lists the selectable upstream prices of one channel,
+// so an administrator can bind a channel to exactly one of them.
+func fetchUpstreamPriceGroups(ctx context.Context, upstream dto.UpstreamDTO, endpoint string, authToken string) ([]dto.UpstreamPriceGroup, error) {
+	if strings.TrimSpace(endpoint) != "" {
+		upstream.Endpoint = endpoint
+	}
+	fetched, err := fetchUpstreamBody(ctx, newUpstreamRatioHTTPClient(), upstream, defaultTimeoutSeconds, upstreamFetchOptions{
+		Source:         ratio_setting.RatioProtectSourceSub2API,
+		AuthToken:      authToken,
+		SkipChannelKey: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !fetched.Sub2API {
+		return nil, fmt.Errorf("该上游不是 Sub2API 模型广场接口，无法列出分组价格")
+	}
+	groups, err := parseSub2APIPlazaGroups(fetched.Body)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]dto.UpstreamPriceGroup, 0, len(groups))
+	for _, group := range groups {
+		result = append(result, dto.UpstreamPriceGroup{
+			ID:                 group.ID,
+			Name:               group.Name,
+			Platform:           group.Platform,
+			RateMultiplier:     group.rate(),
+			PeakRateEnabled:    group.PeakRateEnabled,
+			PeakRateMultiplier: group.PeakRateMultiplier,
+			ModelCount:         len(group.Models),
+		})
+	}
+	return result, nil
+}
+
+// FetchUpstreamPriceGroups serves the upstream price list for one channel so the
+// administrator can pick the price that channel follows.
+func FetchUpstreamPriceGroups(c *gin.Context) {
+	channelID, err := strconv.Atoi(strings.TrimSpace(c.Query("channel_id")))
+	if err != nil || channelID == 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "请先选择上游渠道"})
+		return
+	}
+	endpoint := strings.TrimSpace(c.Query("endpoint"))
+	if endpoint == "" {
+		endpoint = ratio_setting.RatioProtectSub2APIDefaultEndpoint
+	}
+	upstream, err := resolveProtectUpstreamDTO(channelID, endpoint)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	groups, err := fetchUpstreamPriceGroups(c.Request.Context(), upstream, endpoint, ratio_setting.GetRatioProtectSetting().AuthToken)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": groups})
 }
 
 func GetSyncableChannels(c *gin.Context) {

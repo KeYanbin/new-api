@@ -26,6 +26,7 @@ import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
 import { RatioProtectSection } from './ratio-protect-section'
+import { getRatioProtectSources } from './ratio-protect-sources'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -121,22 +122,16 @@ const BILLING_SECTIONS = [
     id: 'ratio-protect',
     titleKey: 'Upstream Ratio Protection',
     build: (settings: BillingSettings) => {
-      let channelIds = settings['ratio_protect_setting.channel_ids'] ?? []
-      if (channelIds.length === 0 && settings['ratio_protect_setting.channel_id']) {
-        channelIds = [settings['ratio_protect_setting.channel_id']]
-      }
       return (
         <RatioProtectSection
           defaultValues={{
             enabled: settings['ratio_protect_setting.enabled'],
             auto_apply: settings['ratio_protect_setting.auto_apply'],
-            interval_minutes: settings['ratio_protect_setting.interval_minutes'],
-            channel_id: settings['ratio_protect_setting.channel_id'],
-            channel_ids: channelIds,
-            endpoint: settings['ratio_protect_setting.endpoint'],
+            interval_minutes:
+              settings['ratio_protect_setting.interval_minutes'],
+            sources: getRatioProtectSources(settings),
             has_auth_token: settings['ratio_protect_setting.has_auth_token'],
             auth_token: '',
-            sync_groups: settings['ratio_protect_setting.sync_groups'] ?? [],
             markup_mode: settings['ratio_protect_setting.markup_mode'],
             markup_value: settings['ratio_protect_setting.markup_value'],
             protect_model_ratio:
