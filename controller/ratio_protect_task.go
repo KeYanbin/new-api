@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -245,7 +246,9 @@ func runRatioProtectTaskOnce(ctx context.Context, _ bool, report func(processed,
 		report(summary.Checked, max(summary.Checked, 1))
 	}
 	if setting.Notify && summary.Applied > 0 {
-		service.NotifyRootUser(dto.NotifyTypeChannelUpdate, "上游倍率保护已跟随", buildRatioProtectNotification(summary))
+		service.NotifyChannelWatchers(dto.NotifyTypeChannelUpdate, func(lang string) (string, string) {
+			return i18n.Translate(lang, i18n.MsgRatioProtectNotifySubject), buildRatioProtectNotification(lang, summary)
+		})
 	}
 	return summary, nil
 }
@@ -440,41 +443,64 @@ func persistRatioProtectStates(setting *ratio_setting.RatioProtectSetting, state
 	return nil
 }
 
-func buildRatioProtectNotification(summary *ratioProtectTaskSummary) string {
+// buildRatioProtectNotification renders the check summary in the recipient's
+// language, truncating each detail list to ratioProtectNotifyMaxDetails.
+func buildRatioProtectNotification(lang string, summary *ratioProtectTaskSummary) string {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf(
-		"上游倍率保护巡检：检查 %d 项，已跟随 %d 项，未变 %d 项，跳过 %d 项，失败 %d 项。",
-		summary.Checked,
-		summary.Applied,
-		summary.Unchanged,
-		summary.Skipped,
-		summary.Failed,
-	))
+	builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifySummary, map[string]any{
+		"Checked":   summary.Checked,
+		"Applied":   summary.Applied,
+		"Unchanged": summary.Unchanged,
+		"Skipped":   summary.Skipped,
+		"Failed":    summary.Failed,
+	}))
 	if summary.Source != "" {
-		builder.WriteString("\n监听源：" + summary.Source)
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifySource, map[string]any{
+			"Source": summary.Source,
+		}))
 	}
 	if len(summary.AppliedModels) > 0 {
 		display := min(len(summary.AppliedModels), ratioProtectNotifyMaxDetails)
-		builder.WriteString(fmt.Sprintf("\n已跟随模型：%s", strings.Join(summary.AppliedModels[:display], ", ")))
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyAppliedModels, map[string]any{
+			"Models": strings.Join(summary.AppliedModels[:display], ", "),
+		}))
 		if len(summary.AppliedModels) > display {
-			builder.WriteString(fmt.Sprintf("（其余 %d 个已省略）", len(summary.AppliedModels)-display))
+			builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyMoreOmitted, map[string]any{
+				"Count": len(summary.AppliedModels) - display,
+			}))
 		}
 	}
 	if len(summary.AppliedGroups) > 0 {
 		display := min(len(summary.AppliedGroups), ratioProtectNotifyMaxDetails)
-		builder.WriteString(fmt.Sprintf("\n已跟随分组：%s", strings.Join(summary.AppliedGroups[:display], ", ")))
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyAppliedGroups, map[string]any{
+			"Groups": strings.Join(summary.AppliedGroups[:display], ", "),
+		}))
 		if len(summary.AppliedGroups) > display {
-			builder.WriteString(fmt.Sprintf("（其余 %d 个已省略）", len(summary.AppliedGroups)-display))
+			builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyMoreOmitted, map[string]any{
+				"Count": len(summary.AppliedGroups) - display,
+			}))
 		}
 	}
 	if len(summary.Conflicts) > 0 {
-		builder.WriteString("\n价格冲突：" + strings.Join(summary.Conflicts, "；"))
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyConflicts, map[string]any{
+			"Conflicts": strings.Join(summary.Conflicts, "；"),
+		}))
 	}
 	if len(summary.FailedSources) > 0 {
-		builder.WriteString("\n失败源：" + strings.Join(summary.FailedSources, "；"))
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyFailedSources, map[string]any{
+			"FailedSources": strings.Join(summary.FailedSources, "；"),
+		}))
 	}
 	if len(summary.Notes) > 0 {
-		builder.WriteString("\n说明：" + strings.Join(summary.Notes, "；"))
+		builder.WriteString("\n")
+		builder.WriteString(i18n.Translate(lang, i18n.MsgRatioProtectNotifyNotes, map[string]any{
+			"Notes": strings.Join(summary.Notes, "；"),
+		}))
 	}
 	return builder.String()
 }
