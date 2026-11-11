@@ -93,8 +93,7 @@ func GetOptions(c *gin.Context) {
 			strings.HasSuffix(k, "Secret") ||
 			strings.HasSuffix(k, "Key") ||
 			strings.HasSuffix(k, "secret") ||
-			strings.HasSuffix(k, "api_key") ||
-			strings.HasSuffix(k, "_token")
+			strings.HasSuffix(k, "api_key")
 		if isSensitiveKey {
 			continue
 		}
@@ -126,10 +125,6 @@ func GetOptions(c *gin.Context) {
 	options = append(options, &model.Option{
 		Key:   "CompletionRatioMeta",
 		Value: buildCompletionRatioMetaValue(optionValues),
-	})
-	options = append(options, &model.Option{
-		Key:   "ratio_protect_setting.has_auth_token",
-		Value: strconv.FormatBool(ratio_setting.GetRatioProtectSetting().HasAuthToken()),
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -408,17 +403,6 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			common.ApiError(c, err)
 			return
-		}
-	default:
-		if strings.HasPrefix(option.Key, "ratio_protect_setting.") {
-			err = ratio_setting.ValidateRatioProtectOption(option.Key, option.Value.(string))
-			if err != nil {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": err.Error(),
-				})
-				return
-			}
 		}
 	}
 	if model.IsPasskeyDomainOption(option.Key) {

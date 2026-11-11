@@ -107,23 +107,6 @@ const defaultBillingSettings: BillingSettings = {
   'checkin_setting.enabled': false,
   'checkin_setting.min_quota': 1000,
   'checkin_setting.max_quota': 10000,
-  'ratio_protect_setting.enabled': false,
-  'ratio_protect_setting.auto_apply': true,
-  'ratio_protect_setting.interval_minutes': 15,
-  'ratio_protect_setting.channel_id': 0,
-  'ratio_protect_setting.channel_ids': [],
-  'ratio_protect_setting.endpoint': '',
-  'ratio_protect_setting.has_auth_token': false,
-  'ratio_protect_setting.sync_groups': [],
-  'ratio_protect_setting.sources': 'null',
-  'ratio_protect_setting.markup_mode': 'add',
-  'ratio_protect_setting.markup_value': 0.1,
-  'ratio_protect_setting.protect_model_ratio': true,
-  'ratio_protect_setting.protect_model_price': false,
-  'ratio_protect_setting.protect_group_ratio': true,
-  'ratio_protect_setting.skip_zero_upstream': true,
-  'ratio_protect_setting.max_change_factor': 5,
-  'ratio_protect_setting.notify': true,
 }
 
 export function BillingSettings() {

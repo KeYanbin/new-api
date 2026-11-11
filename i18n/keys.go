@@ -113,17 +113,3 @@ const (
 	MsgChannelUpstreamUpdateFailedChannels  = "channel.upstream_update_failed_channels"
 	MsgChannelUpstreamUpdateMoreOmitted     = "channel.upstream_update_more_omitted"
 )
-
-// Upstream ratio protection notices sent to administrators who receive channel
-// notices
-const (
-	MsgRatioProtectNotifySubject       = "ratio_protect.notify_subject"
-	MsgRatioProtectNotifySummary       = "ratio_protect.notify_summary"
-	MsgRatioProtectNotifySource        = "ratio_protect.notify_source"
-	MsgRatioProtectNotifyAppliedModels = "ratio_protect.notify_applied_models"
-	MsgRatioProtectNotifyAppliedGroups = "ratio_protect.notify_applied_groups"
-	MsgRatioProtectNotifyMoreOmitted   = "ratio_protect.notify_more_omitted"
-	MsgRatioProtectNotifyConflicts     = "ratio_protect.notify_conflicts"
-	MsgRatioProtectNotifyFailedSources = "ratio_protect.notify_failed_sources"
-	MsgRatioProtectNotifyNotes         = "ratio_protect.notify_notes"
-)

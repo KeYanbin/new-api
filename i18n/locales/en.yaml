@@ -89,15 +89,3 @@ channel.upstream_update_added_models: "Added model examples (showing {{.Shown}}/
 channel.upstream_update_removed_models: "Removed model examples (showing {{.Shown}}/{{.Total}}): {{.Models}}"
 channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}/{{.Total}}): {{.Ids}}"
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
-
-# Upstream ratio protection notices sent to administrators who receive channel
-# notices
-ratio_protect.notify_subject: "Upstream ratio protection applied the upstream prices"
-ratio_protect.notify_summary: "Upstream ratio protection check: {{.Checked}} checked, {{.Applied}} applied, {{.Unchanged}} unchanged, {{.Skipped}} skipped, {{.Failed}} failed."
-ratio_protect.notify_source: "Watched source: {{.Source}}"
-ratio_protect.notify_applied_models: "Applied models: {{.Models}}"
-ratio_protect.notify_applied_groups: "Applied groups: {{.Groups}}"
-ratio_protect.notify_more_omitted: " ({{.Count}} more omitted)"
-ratio_protect.notify_conflicts: "Price conflicts: {{.Conflicts}}"
-ratio_protect.notify_failed_sources: "Failed sources: {{.FailedSources}}"
-ratio_protect.notify_notes: "Notes: {{.Notes}}"

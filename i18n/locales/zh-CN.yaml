@@ -90,14 +90,3 @@ channel.upstream_update_added_models: "新增模型示例（展示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "删除模型示例（展示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
-
-# 上游倍率保护巡检通知（发送给接收渠道通知的管理员）
-ratio_protect.notify_subject: "上游倍率保护已跟随"
-ratio_protect.notify_summary: "上游倍率保护巡检：检查 {{.Checked}} 项，已跟随 {{.Applied}} 项，未变 {{.Unchanged}} 项，跳过 {{.Skipped}} 项，失败 {{.Failed}} 项。"
-ratio_protect.notify_source: "监听源：{{.Source}}"
-ratio_protect.notify_applied_models: "已跟随模型：{{.Models}}"
-ratio_protect.notify_applied_groups: "已跟随分组：{{.Groups}}"
-ratio_protect.notify_more_omitted: "（其余 {{.Count}} 个已省略）"
-ratio_protect.notify_conflicts: "价格冲突：{{.Conflicts}}"
-ratio_protect.notify_failed_sources: "失败源：{{.FailedSources}}"
-ratio_protect.notify_notes: "说明：{{.Notes}}"
