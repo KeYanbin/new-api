@@ -35,6 +35,8 @@ import {
   OFFICIAL_CHANNEL_NAME,
   MODELS_DEV_PRESET_ID,
   MODELS_DEV_PRESET_NAME,
+  MODEL_PRICE_REPO_PRESET_ID,
+  MODEL_PRICE_REPO_PRESET_NAME,
 } from './constants'
 import { formatPricingNumber } from './pricing-format'
 import type {
@@ -54,6 +56,13 @@ export function getUpstreamDisplayName(
     sourceName === `${OFFICIAL_CHANNEL_NAME}(${OFFICIAL_CHANNEL_ID})`
   ) {
     return t('Official pricing preset')
+  }
+  if (
+    sourceName === MODEL_PRICE_REPO_PRESET_NAME ||
+    sourceName ===
+      `${MODEL_PRICE_REPO_PRESET_NAME}(${MODEL_PRICE_REPO_PRESET_ID})`
+  ) {
+    return t('model-price-repo pricing preset')
   }
   if (
     sourceName === MODELS_DEV_PRESET_NAME ||

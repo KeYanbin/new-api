@@ -21,7 +21,7 @@ export const DEFAULT_ENDPOINT = '/api/pricing'
 // ---------------------------------------------------------------------------
 // Built-in upstream ratio presets
 //
-// The backend (`controller/ratio_sync.go`) synthesizes two virtual channels and
+// The backend (`controller/ratio_sync.go`) synthesizes virtual channels and
 // returns them in the syncable channels response. The constants below mirror
 // the backend literals one-to-one; do NOT translate the *_NAME values because
 // they are wire-protocol identifiers, not user-facing labels.
@@ -41,6 +41,13 @@ export const MODELS_DEV_PRESET_ID = -101
 export const MODELS_DEV_PRESET_NAME = 'models.dev 价格预设'
 export const MODELS_DEV_PRESET_BASE_URL = 'https://models.dev'
 export const MODELS_DEV_PRESET_ENDPOINT = 'https://models.dev/api.json'
+
+export const MODEL_PRICE_REPO_PRESET_ID = -102
+export const MODEL_PRICE_REPO_PRESET_NAME = 'model-price-repo'
+export const MODEL_PRICE_REPO_PRESET_BASE_URL =
+  'https://raw.githubusercontent.com'
+export const MODEL_PRICE_REPO_PRESET_ENDPOINT =
+  '/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json'
 
 export const OPENROUTER_ENDPOINT = 'openrouter'
 

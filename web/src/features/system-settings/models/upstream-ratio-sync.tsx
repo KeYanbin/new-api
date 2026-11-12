@@ -62,6 +62,8 @@ import {
   DEFAULT_ENDPOINT,
   MODELS_DEV_PRESET_ENDPOINT,
   MODELS_DEV_PRESET_ID,
+  MODEL_PRICE_REPO_PRESET_ENDPOINT,
+  MODEL_PRICE_REPO_PRESET_ID,
   OFFICIAL_CHANNEL_ENDPOINT,
   OFFICIAL_CHANNEL_ID,
   OPENROUTER_CHANNEL_TYPE,
@@ -81,6 +83,9 @@ import {
 import { UpstreamRatioSyncTable } from './upstream-ratio-sync-table'
 
 function getDefaultEndpointForChannel(channel: UpstreamChannel): string {
+  if (channel.id === MODEL_PRICE_REPO_PRESET_ID) {
+    return MODEL_PRICE_REPO_PRESET_ENDPOINT
+  }
   if (channel.id === MODELS_DEV_PRESET_ID) return MODELS_DEV_PRESET_ENDPOINT
   if (channel.id === OFFICIAL_CHANNEL_ID) return OFFICIAL_CHANNEL_ENDPOINT
   if (channel.type === OPENROUTER_CHANNEL_TYPE) return OPENROUTER_ENDPOINT

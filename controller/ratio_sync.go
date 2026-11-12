@@ -43,6 +43,10 @@ const (
 	modelsDevHost               = "models.dev"
 	modelsDevPath               = "/api.json"
 	modelsDevInputCostRatioBase = 1000.0
+	modelPriceRepoPresetID      = -102
+	modelPriceRepoPresetName    = "model-price-repo"
+	modelPriceRepoPresetBaseURL = "https://raw.githubusercontent.com"
+	modelPriceRepoPresetPath    = "/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json"
 )
 
 func nearlyEqual(a, b float64) bool {
@@ -230,6 +234,9 @@ func FetchUpstreamRatios(c *gin.Context) {
 			if strings.HasPrefix(u.BaseURL, "http") {
 				if u.Endpoint == "" {
 					u.Endpoint = defaultEndpoint
+					if u.ID == modelPriceRepoPresetID {
+						u.Endpoint = modelPriceRepoPresetPath
+					}
 				}
 				u.BaseURL = strings.TrimRight(u.BaseURL, "/")
 				upstreams = append(upstreams, u)
@@ -314,6 +321,8 @@ func FetchUpstreamRatios(c *gin.Context) {
 				fullURL = chItem.BaseURL + endpoint
 			}
 			isModelsDev := isModelsDevAPIEndpoint(fullURL)
+			parsedURL, _ := url.Parse(fullURL)
+			isLiteLLM := parsedURL != nil && strings.HasSuffix(parsedURL.Path, "/model_prices_and_context_window.json")
 
 			uniqueName := chItem.Name
 			if chItem.ID != 0 {
@@ -322,6 +331,15 @@ func FetchUpstreamRatios(c *gin.Context) {
 
 			ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.Timeout)*time.Second)
 			defer cancel()
+			if parsedURL != nil && strings.EqualFold(parsedURL.Hostname(), "raw.githubusercontent.com") && parsedURL.Path == modelPriceRepoPresetPath {
+				data, err := fetchModelPriceRepoPricing(ctx, client)
+				if err != nil {
+					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+					return
+				}
+				ch <- upstreamResult{Name: uniqueName, Data: data}
+				return
+			}
 
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 			if err != nil {
@@ -403,6 +421,16 @@ func FetchUpstreamRatios(c *gin.Context) {
 				converted, err := convertModelsDevToRatioData(bytes.NewReader(bodyBytes))
 				if err != nil {
 					logger.LogWarn(c.Request.Context(), common.LogText("models.dev parse failed from %s: %s", chItem.Name, err.Error()))
+					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+					return
+				}
+				ch <- upstreamResult{Name: uniqueName, Data: converted}
+				return
+			}
+
+			if isLiteLLM {
+				converted, err := convertLiteLLMToPricingData(bytes.NewReader(bodyBytes))
+				if err != nil {
 					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
 					return
 				}
@@ -1162,6 +1190,12 @@ func GetSyncableChannels(c *gin.Context) {
 		ID:      modelsDevPresetID,
 		Name:    modelsDevPresetName,
 		BaseURL: modelsDevPresetBaseURL,
+		Status:  1,
+	})
+	syncableChannels = append(syncableChannels, dto.SyncableChannel{
+		ID:      modelPriceRepoPresetID,
+		Name:    modelPriceRepoPresetName,
+		BaseURL: modelPriceRepoPresetBaseURL,
 		Status:  1,
 	})
 

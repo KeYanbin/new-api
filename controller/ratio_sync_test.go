@@ -1,9 +1,18 @@
 package controller
 
 import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -11,9 +20,220 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"net/http"
-	"net/http/httptest"
 )
+
+type pricingHTTPTransport func(*http.Request) (*http.Response, error)
+
+func (transport pricingHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func TestModelPriceRepoFallsBackToOfficialAPI(t *testing.T) {
+	pricing := `{"m":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000008}}`
+	wrapped, err := common.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(pricing))})
+	require.NoError(t, err)
+	cases := []struct {
+		name      string
+		rawStatus int
+		rawBody   string
+		rawErr    error
+		apiBody   string
+		apiErr    error
+		wantHosts []string
+		wantErr   bool
+	}{
+		{"raw address succeeds without contacting API", 200, pricing, nil, "", nil, []string{"raw.githubusercontent.com"}, false},
+		{"connection reset falls back to raw API response", 0, "", errors.New("connection reset"), pricing, nil, []string{"raw.githubusercontent.com", "api.github.com"}, false},
+		{"failed raw status falls back to Contents encoding", 503, "", nil, string(wrapped), nil, []string{"raw.githubusercontent.com", "api.github.com"}, false},
+		{"invalid raw pricing falls back to API", 200, "{}", nil, pricing, nil, []string{"raw.githubusercontent.com", "api.github.com"}, false},
+		{"raw timeout preserves API request budget", 0, "", context.DeadlineExceeded, pricing, nil, []string{"raw.githubusercontent.com", "api.github.com"}, false},
+		{"both addresses fail without importing prices", 0, "", errors.New("connection reset"), "", errors.New("API unavailable"), []string{"raw.githubusercontent.com", "api.github.com"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var hosts []string
+			client := &http.Client{Transport: pricingHTTPTransport(func(request *http.Request) (*http.Response, error) {
+				hosts = append(hosts, request.URL.Hostname())
+				assert.Empty(t, request.Header.Get("Authorization"))
+				assert.Equal(t, "application/vnd.github.raw+json", request.Header.Get("Accept"))
+				status, body, err := tc.rawStatus, tc.rawBody, tc.rawErr
+				if request.URL.Hostname() == "api.github.com" {
+					assert.Equal(t, "main", request.URL.Query().Get("ref"))
+					assert.Equal(t, "/repos/Wei-Shaw/model-price-repo/contents/model_prices_and_context_window.json", request.URL.Path)
+					status, body, err = 200, tc.apiBody, tc.apiErr
+				} else {
+					parentDeadline, _ := ctx.Deadline()
+					rawDeadline, ok := request.Context().Deadline()
+					assert.True(t, ok && rawDeadline.Before(parentDeadline), "the API fallback retains part of the caller's timeout")
+				}
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			})}
+			data, err := fetchModelPriceRepoPricing(ctx, client)
+			assert.Equal(t, tc.wantHosts, hosts)
+			if tc.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, data)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, map[string]any{"m": `tier("base", p * 2 + c * 8)`}, valueMap(data["billing_expr"]))
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &http.Client{Transport: pricingHTTPTransport(func(*http.Request) (*http.Response, error) {
+		t.Error("canceled fetch must not contact either address")
+		return nil, context.Canceled
+	})}
+	_, err = fetchModelPriceRepoPricing(ctx, client)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLiteLLMPricingPreservesTokenRatesAndContextTiers(t *testing.T) {
+	contextPricing := `{"input_cost_per_token":0.0000025,"output_cost_per_token":0.000015,"cache_read_input_token_cost":0.00000025,"input_cost_per_token_above_272k_tokens":0.000005,"output_cost_per_token_above_272k_tokens":0.0000225,"cache_read_input_token_cost_above_272k_tokens":0.0000005,"input_cost_per_token_priority":0.000005}`
+	contextExpression := `len <= 272000 ? tier("base", p * 2.5 + c * 15 + cr * 0.25) : tier("above_272000", p * 5 + c * 22.5 + cr * 0.5)`
+	gptPricing := `{"mode":"chat","input_cost_per_token":0.000002,"output_cost_per_token":0.00001,"cache_read_input_token_cost":0.0000001,"cache_creation_input_token_cost":0.0000025,"cache_creation_input_token_cost_above_12hr":0.000005,"input_cost_per_token_above_272k_tokens":0.000004,"output_cost_per_token_above_272k_tokens":0.000015,"cache_read_input_token_cost_above_272k_tokens":0.0000002,"cache_creation_input_token_cost_above_272k_tokens":0.000005,"cache_creation_input_token_cost_above_12hr_above_272k_tokens":0.00001}`
+	gptExpression := `len <= 272000 ? tier("base", p * 2 + c * 10 + cr * 0.1 + cc * 2.5 + cc12h * 5) : tier("above_272000", p * 4 + c * 15 + cr * 0.2 + cc * 5 + cc12h * 10)`
+	cases := []struct {
+		name       string
+		pricing    string
+		expression string
+		params     billingexpr.TokenParams
+		cost       float64
+	}{
+		{
+			name:       "Claude alias keeps both cache TTL prices and explicit free cache reads",
+			pricing:    `{"mode":"chat","input_cost_per_token":0.000005,"output_cost_per_token":0.000025,"cache_read_input_token_cost":0,"cache_creation_input_token_cost":0.00000625,"cache_creation_input_token_cost_above_1hr":0.00001}`,
+			expression: `tier("base", p * 5 + c * 25 + cr * 0 + cc * 6.25 + cc1h * 10)`,
+			params:     billingexpr.TokenParams{P: 100, C: 10, CR: 200, CC: 20, CC1h: 30},
+			cost:       1175,
+		},
+		{
+			name:       "zero input price retains paid output",
+			pricing:    `{"input_cost_per_token":0,"output_cost_per_token":0.000001}`,
+			expression: `tier("base", p * 0 + c * 1)`,
+			params:     billingexpr.TokenParams{P: 100, C: 10},
+			cost:       10,
+		},
+		{
+			name:       "GPT 6.1 sol keeps 12 hour cache prices at the context boundary",
+			pricing:    gptPricing,
+			expression: gptExpression,
+			params:     billingexpr.TokenParams{P: 1000, C: 100, CR: 100, CC: 20, CC12h: 30, Len: 272000},
+			cost:       3210,
+		},
+		{
+			name:       "GPT 6.1 sol increases 12 hour cache prices above the context boundary",
+			pricing:    gptPricing,
+			expression: gptExpression,
+			params:     billingexpr.TokenParams{P: 1000, C: 100, CR: 100, CC: 20, CC12h: 30, Len: 272001},
+			cost:       5920,
+		},
+		{
+			name:       "Claude increases one hour cache prices independently in long contexts",
+			pricing:    `{"input_cost_per_token":0.000005,"output_cost_per_token":0.000025,"cache_creation_input_token_cost":0.00000625,"cache_creation_input_token_cost_above_1hr":0.00001,"cache_creation_input_token_cost_above_200k_tokens":0.0000125,"cache_creation_input_token_cost_above_1hr_above_200k_tokens":0.00002}`,
+			expression: `len <= 200000 ? tier("base", p * 5 + c * 25 + cc * 6.25 + cc1h * 10) : tier("above_200000", p * 5 + c * 25 + cc * 12.5 + cc1h * 20)`,
+			params:     billingexpr.TokenParams{P: 100, C: 10, CC: 20, CC1h: 30, Len: 200001},
+			cost:       1600,
+		},
+		{
+			name:       "exact context threshold retains base prices",
+			pricing:    contextPricing,
+			expression: contextExpression,
+			params:     billingexpr.TokenParams{P: 1000, C: 100, CR: 100, Len: 272000},
+			cost:       4025,
+		},
+		{
+			name:       "context threshold uses total input including cached tokens",
+			pricing:    contextPricing,
+			expression: contextExpression,
+			params:     billingexpr.TokenParams{P: 1000, C: 100, CR: 100, Len: 272001},
+			cost:       7300,
+		},
+		{
+			name:       "multiple tiers inherit unchanged output prices",
+			pricing:    `{"input_cost_per_token":0.000005,"output_cost_per_token":0.000025,"input_cost_per_token_above_200k_tokens":0.000015,"input_cost_per_token_above_100k_tokens":0.00001}`,
+			expression: `len <= 100000 ? tier("base", p * 5 + c * 25) : len <= 200000 ? tier("above_100000", p * 10 + c * 25) : tier("above_200000", p * 15 + c * 25)`,
+			params:     billingexpr.TokenParams{P: 100, C: 10, Len: 200000},
+			cost:       1250,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := convertLiteLLMToPricingData(strings.NewReader(`{"claude-alias-thinking":` + tc.pricing + `}`))
+			require.NoError(t, err)
+			assert.Equal(t, billing_setting.BillingModeTieredExpr, valueMap(data["billing_mode"])["claude-alias-thinking"])
+			expression, ok := valueMap(data["billing_expr"])["claude-alias-thinking"].(string)
+			require.True(t, ok)
+			assert.Equal(t, tc.expression, expression)
+			cost, _, err := billingexpr.RunExpr(expression, tc.params)
+			require.NoError(t, err)
+			assert.Equal(t, tc.cost, cost)
+			assert.NotContains(t, data, "model_ratio")
+		})
+	}
+}
+
+func TestLiteLLMPricingRejectsIncompleteAndInvalidPrices(t *testing.T) {
+	cases := []string{
+		`{"input_cost_per_token":0}`,
+		`{"input_cost_per_token":null,"output_cost_per_token":0}`,
+		`{"input_cost_per_token":-1,"output_cost_per_token":0}`,
+		`{"input_cost_per_token":1e308,"output_cost_per_token":0}`,
+		`{"input_cost_per_token":"invalid","output_cost_per_token":0}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"cache_read_input_token_cost":-1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"input_cost_per_token_above_200k_tokens":-1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"cache_read_input_token_cost_above_200k_tokens":1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"cache_creation_input_token_cost":0,"cache_creation_input_token_cost_above_12hr_above_272k_tokens":1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"cache_creation_input_token_cost_above_12hr":0,"cache_creation_input_token_cost_above_12hr_above_272k_tokens":-1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"cache_creation_input_token_cost_above_1hr":0,"cache_creation_input_token_cost_above_1hr_above_invalidk_tokens":1}`,
+		`{"input_cost_per_token":0,"output_cost_per_token":0,"long_context_input_token_threshold":32000}`,
+		`{"mode":"image_generation","input_cost_per_token":0,"output_cost_per_token":0}`,
+	}
+	for _, pricing := range cases {
+		t.Run(pricing, func(t *testing.T) {
+			data, err := convertLiteLLMToPricingData(strings.NewReader(`{"invalid":` + pricing + `,"free":{"input_cost_per_token":0,"output_cost_per_token":0},"sample_spec":"metadata"}`))
+			require.NoError(t, err)
+			assert.Equal(t, map[string]any{"free": `tier("base", p * 0 + c * 0)`}, valueMap(data["billing_expr"]))
+		})
+	}
+	for _, body := range []string{`{}`, `{"model":{}}`, `{"model":`} {
+		_, err := convertLiteLLMToPricingData(strings.NewReader(body))
+		assert.Error(t, err)
+	}
+}
+
+func TestPricingSyncFetchesModelPriceRepoPreset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, modelPriceRepoPresetPath, r.URL.Path)
+		assert.Empty(t, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"sync-repo-alias":{"input_cost_per_token":0.000005,"output_cost_per_token":0.000025,"cache_creation_input_token_cost_above_1hr":0.00001}}`))
+	}))
+	defer server.Close()
+	var response struct {
+		Success bool
+		Data    struct {
+			Prices      map[string]struct{ Upstreams map[string]map[string]any }
+			TestResults []dto.TestResult `json:"test_results"`
+		}
+	}
+	body := map[string]any{"upstreams": []map[string]any{
+		{"id": modelPriceRepoPresetID, "name": modelPriceRepoPresetName, "base_url": server.URL},
+	}}
+	recorder := modelManagementRequest(t, FetchUpstreamRatios, http.MethodPost, "/api/ratio_sync/fetch", body, &response)
+	require.True(t, response.Success, recorder.Body.String())
+	require.Len(t, response.Data.TestResults, 1)
+	assert.Equal(t, "success", response.Data.TestResults[0].Status)
+	assert.Equal(t, map[string]any{
+		"billing_mode": "tiered_expr",
+		"billing_expr": `tier("base", p * 5 + c * 25 + cc1h * 10)`,
+	}, response.Data.Prices["sync-repo-alias"].Upstreams["model-price-repo(-102)"])
+}
 
 func TestPricingSyncExpressionPriority(t *testing.T) {
 	expression := `tier("base", p * 2 + c * 8 + cr * 0)`

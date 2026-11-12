@@ -563,6 +563,94 @@ it('shows a source failure instead of a no-differences result and retries the se
   expect(post.mock.calls[0]).toEqual(post.mock.calls[1])
 })
 
+it('selects the model-price-repo preset with its JSON endpoint and previews imported expression prices', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/ratio_sync/channels'
+          ? [
+              {
+                id: -102,
+                name: 'model-price-repo',
+                base_url: 'https://raw.githubusercontent.com',
+                status: 1,
+              },
+            ]
+          : {
+              entries: [],
+              empty_version: 'empty',
+              options: pricingOptions({}),
+            },
+    },
+  }))
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        differences: {},
+        prices: {
+          'claude-alias': {
+            current: {},
+            upstreams: {
+              'model-price-repo(-102)': {
+                billing_mode: 'tiered_expr',
+                billing_expr: expression,
+              },
+            },
+          },
+        },
+        test_results: [{ name: 'model-price-repo(-102)', status: 'success' }],
+      },
+    },
+  })
+  const patch = vi.spyOn(api, 'patch')
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <UpstreamRatioSync />
+    </QueryClientProvider>
+  )
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'Select price sources' }))
+  const source = await screen.findByRole('checkbox', {
+    name: 'Select model-price-repo pricing preset',
+  })
+  const sourceRow = source.closest('tr')
+  if (!sourceRow) throw new Error('Missing price source row')
+  expect(within(sourceRow).queryByText('Official')).not.toBeInTheDocument()
+  await user.click(source)
+  await user.click(screen.getByRole('button', { name: 'Confirm Selection' }))
+  await user.click(
+    await screen.findByRole('checkbox', {
+      name: 'Select price for claude-alias from model-price-repo pricing preset',
+    })
+  )
+  expect(post).toHaveBeenCalledWith('/api/ratio_sync/fetch', {
+    upstreams: [
+      {
+        id: -102,
+        name: 'model-price-repo',
+        base_url: 'https://raw.githubusercontent.com',
+        endpoint:
+          '/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json',
+      },
+    ],
+    timeout: 10,
+    include_unchanged: true,
+  })
+  await user.click(screen.getByRole('button', { name: 'Apply Sync' }))
+  const preview = screen.getByRole('alertdialog', {
+    name: 'Preview price changes',
+  })
+  expect(within(preview).getByText(/Expression pricing/)).toHaveTextContent(
+    'Input: $2'
+  )
+  expect(patch).not.toHaveBeenCalled()
+})
+
 it('preserves upstream expression text so a repeated comparison remains unchanged', () => {
   const source =
     'tier("base", p * 2 + c * 8) * (header("service-tier") == "fast" ? 2 : 1)'
@@ -1180,15 +1268,13 @@ it('disables both batch shortcuts when the configured exchange rate becomes inva
     })
   )
   await act(async () =>
-    useSystemConfigStore
-      .getState()
-      .setConfig({
-        currency: {
-          ...DEFAULT_CURRENCY_CONFIG,
-          quotaDisplayType: 'CNY',
-          usdExchangeRate: 0,
-        },
-      })
+    useSystemConfigStore.getState().setConfig({
+      currency: {
+        ...DEFAULT_CURRENCY_CONFIG,
+        quotaDisplayType: 'CNY',
+        usdExchangeRate: 0,
+      },
+    })
   )
   expect(
     screen.getByRole('button', { name: /Multiply by exchange rate/ })
